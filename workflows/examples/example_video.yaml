@@ -1,0 +1,131 @@
+# Example: a workflow that starts from a video the user picks on the phone.
+#
+# The class_type values in example_video_api.json are invented placeholders -
+# "ExampleVideoLoader" and friends are not real nodes, and this file is not a
+# runnable graph. Video generation needs whichever nodes your own ComfyUI has,
+# and LocalCanvas never branches on a node's class_type: all a definition needs
+# from the JSON is a node id and an input name. Replace the JSON with your own
+# API-format export and update the `bind:` blocks to match.
+
+id: example_video
+name: Example Video to Video
+workflow: example_video_api.json
+
+presentation:
+  group: Video
+  category: Example
+  badge: VIDEO
+
+  short_description: >
+    An example that reworks a short clip you choose, guided by a prompt.
+
+  best_for:
+    - Learning how a video input is declared
+    - Short clips of a few seconds
+
+  how_to_use: >
+    Pick a clip, describe what should change, and keep the frame count low
+    while you are trying things out - video is slow.
+
+  input_summary: Video and prompt
+
+  example_prompt: >
+    The same shot as an ink drawing, strong outlines
+
+  not_ideal_for:
+    - Long clips
+    - Anything you need quickly
+
+inputs:
+  - id: source_video
+    label: Source clip
+    type: video
+    required: true
+    section: main
+    help: The clip to work from.
+    bind:
+      node: "2"
+      input: video
+
+  - id: prompt
+    label: Prompt
+    type: multiline
+    required: true
+    section: main
+    # Natural language, so the gateway may translate it before binding
+    # (docs/api.md). Nothing else in this file is translatable.
+    translatable: true
+    help: Describe what you want to see. More detail gives more to go on.
+    bind:
+      node: "3"
+      input: text
+
+  - id: frames
+    label: Frames
+    type: integer
+    section: main
+    default: 48
+    min: 8
+    max: 128
+    step: 8
+    help: How many frames of the clip to use. Fewer frames finish sooner.
+    bind:
+      node: "2"
+      input: frame_cap
+
+  - id: motion
+    label: Motion
+    type: float
+    section: advanced
+    default: 0.6
+    min: 0.0
+    max: 1.0
+    step: 0.05
+    help: How much movement the result may invent.
+    bind:
+      node: "4"
+      input: motion_strength
+
+  - id: steps
+    label: Steps
+    type: integer
+    section: advanced
+    default: 20
+    min: 1
+    max: 50
+    bind:
+      node: "4"
+      input: steps
+
+  - id: seed
+    label: Seed
+    type: integer
+    section: advanced
+    default: 0
+    min: 0
+    max: 4294967295
+    role: seed
+    bind:
+      node: "4"
+      input: seed
+
+  - id: fps
+    label: Frames per second
+    type: integer
+    section: advanced
+    default: 16
+    min: 1
+    max: 60
+    bind:
+      node: "5"
+      input: fps
+
+  - id: loop
+    label: Loop the result
+    type: boolean
+    section: advanced
+    default: false
+    help: Write the clip so that it plays back as a loop.
+    bind:
+      node: "5"
+      input: loop

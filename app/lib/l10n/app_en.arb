@@ -1,0 +1,554 @@
+{
+  "@@locale": "en",
+
+  "appTitle": "LocalCanvas",
+  "@appTitle": {
+    "description": "The product name, in the Android task switcher. A brand, never translated."
+  },
+
+  "ok": "OK",
+  "cancel": "Cancel",
+  "@cancel": {
+    "description": "Backing out of a dialog without doing the thing it asks about."
+  },
+  "save": "Save",
+  "rename": "Rename",
+  "delete": "Delete",
+  "tryAgain": "Try again",
+  "checkAgain": "Check again",
+  "chooseAnotherServer": "Choose another server",
+  "reconnect": "Reconnect",
+  "connect": "Connect",
+  "change": "Change",
+  "replace": "Replace",
+  "remove": "Remove",
+  "share": "Share",
+  "on": "On",
+  "off": "Off",
+  "valueNone": "—",
+  "@valueNone": {
+    "description": "A value the server did not report. An em dash in every locale."
+  },
+  "listSeparator": ", ",
+  "@listSeparator": {
+    "description": "Between all but the last two items of a list of field names."
+  },
+  "listAnd": "{head} and {last}",
+  "@listAnd": {
+    "description": "The last join of a list of field names. head is one name or several already joined by listSeparator.",
+    "placeholders": { "head": { "type": "String" }, "last": { "type": "String" } }
+  },
+
+  "splitHandleLabel": "Move the split between the controls and the picture",
+  "@splitHandleLabel": {
+    "description": "Spoken name of the draggable divider between the two panes on a wide screen. A screen reader reads it and then offers increase/decrease, which widen and narrow the controls side."
+  },
+
+  "appearanceTitle": "Appearance",
+  "appearanceNote": "Light, dark, or whatever this phone is set to. This one stays on this phone — it is not in your profile.",
+  "appearanceLight": "Light",
+  "appearanceDark": "Dark",
+  "appearanceSystem": "System",
+  "@appearanceSystem": {
+    "description": "Follow the phone's own light/dark setting. These three are read directly under the block's own heading, so where the language inflects they agree with the word that heading uses -- not with an English noun that is nowhere on the screen."
+  },
+
+  "languageTitle": "Language",
+  "languageNote": "The language this app speaks. This one stays on this phone too — it is not in your profile.",
+  "languageSystem": "System",
+  "@languageSystem": {
+    "description": "Follow the phone's own language. Agrees with the block's own heading where the language inflects, as the appearance chips do."
+  },
+
+  "connectTitle": "Choose your server",
+  "connectIntro": "LocalCanvas runs beside the generator on your computer. Pick it below, scan its pairing code, or type its address.",
+  "connectOnThisNetwork": "On this network",
+  "@connectOnThisNetwork": {
+    "description": "A section label. Drawn upper-cased by the widget."
+  },
+  "scanPairingCode": "Scan pairing code",
+  "enterAddress": "Enter address",
+  "searchThisNetwork": "Search this network",
+  "searchAgain": "Search again",
+  "lookingForServers": "Looking for servers…",
+  "discoveryEmptyTitle": "No servers answered.",
+  "discoveryEmptyBody": "Some home networks do not pass this kind of search along. The pairing code and the address below always work.",
+  "discoveryUnavailableTitle": "Searching didn't work this time.",
+  "discoveryUnavailableBody": "The pairing code and the address below always work.",
+  "discoveryFailureLabel": "What the system reported",
+  "@discoveryFailureLabel": {
+    "description": "Labels the line beneath it, which carries the platform's own words for why a search failed and is never translated."
+  },
+  "notAPairingCode": "That code isn't a LocalCanvas pairing code. Scan the one your server shows, or enter its address.",
+
+  "manualEntryTitle": "Server address",
+  "manualEntryNote": "The address of the machine running LocalCanvas. Its startup output prints one.",
+  "manualEntryNotAnAddress": "That doesn't look like an address. Try something like 192.0.2.42 or 192.0.2.42:7801.",
+
+  "scanHint": "Point the camera at the code your server shows.",
+  "scanEnterAddressInstead": "Enter the address instead",
+  "scannerPermissionDenied": "LocalCanvas needs camera access to read a pairing code. You can allow it in Settings, or type the address instead.",
+  "scannerUnsupported": "This device cannot scan codes. Type the address instead.",
+  "scannerFailed": "The camera could not be started. Type the address instead.",
+
+  "connecting": "Connecting…",
+  "connectingTo": "Connecting to {serverName}…",
+  "@connectingTo": {
+    "placeholders": { "serverName": { "type": "String" } }
+  },
+
+  "problemUnreachableTitle": "The LocalCanvas server can't be reached.",
+  "problemUnreachableAt": "Nothing answered at {address}. Check that the server is running and that this device is on the same network as it.",
+  "@problemUnreachableAt": {
+    "placeholders": { "address": { "type": "String" } }
+  },
+  "problemUnreachableAnywhere": "Nothing answered at that address. Check that the server is running and that this device is on the same network as it.",
+  "problemNotLocalCanvasTitle": "That address isn't a LocalCanvas server.",
+  "problemNotLocalCanvasAt": "Something answered at {address}, but it did not identify itself as LocalCanvas. Check the address, or scan the pairing code the server shows.",
+  "@problemNotLocalCanvasAt": {
+    "placeholders": { "address": { "type": "String" } }
+  },
+  "problemNotLocalCanvasAnywhere": "Something answered at that address, but it did not identify itself as LocalCanvas. Check the address, or scan the pairing code the server shows.",
+  "problemIncompatibleTitle": "This server speaks a different version.",
+  "problemIncompatibleAt": "The server at {address} uses API version {reported}, and this app speaks version {client}. Update whichever of the two is older, then try again.",
+  "@problemIncompatibleAt": {
+    "placeholders": {
+      "address": { "type": "String" },
+      "reported": { "type": "int" },
+      "client": { "type": "int" }
+    }
+  },
+  "problemIncompatibleAnywhere": "The server at that address uses API version {reported}, and this app speaks version {client}. Update whichever of the two is older, then try again.",
+  "@problemIncompatibleAnywhere": {
+    "placeholders": {
+      "reported": { "type": "int" },
+      "client": { "type": "int" }
+    }
+  },
+  "problemIncompatibleUnknownAt": "The server at {address} uses an API version it did not name, and this app speaks version {client}. Update whichever of the two is older, then try again.",
+  "@problemIncompatibleUnknownAt": {
+    "description": "The version-mismatch sentence for a server that refused to say which version it speaks. A separate sentence rather than a phrase substituted into the one above, because a language that inflects cannot take a noun phrase where a number goes.",
+    "placeholders": {
+      "address": { "type": "String" },
+      "client": { "type": "int" }
+    }
+  },
+  "problemIncompatibleUnknownAnywhere": "The server at that address uses an API version it did not name, and this app speaks version {client}. Update whichever of the two is older, then try again.",
+  "@problemIncompatibleUnknownAnywhere": {
+    "placeholders": { "client": { "type": "int" } }
+  },
+  "problemComfyTitle": "Connected, but ComfyUI isn't running.",
+  "problemComfy": "{serverName} answered, but it cannot generate anything yet. Start ComfyUI on that machine, then try again.",
+  "@problemComfy": {
+    "placeholders": { "serverName": { "type": "String" } }
+  },
+  "problemComfyWithDetail": "{serverName} answered, but it cannot generate anything yet. {detail} Start ComfyUI on that machine, then try again.",
+  "@problemComfyWithDetail": {
+    "description": "detail is the gateway's own sentence about why, passed through as it arrived.",
+    "placeholders": {
+      "serverName": { "type": "String" },
+      "detail": { "type": "String" }
+    }
+  },
+  "problemServerFallbackName": "The server",
+  "@problemServerFallbackName": {
+    "description": "Stands in for the server's own name before it has given one. Used as the subject of a sentence."
+  },
+
+  "serverConnected": "Connected",
+  "serverReady": "Ready",
+  "serverNotReady": "Not ready to generate",
+  "serverDetailAddress": "Address",
+  "serverDetailServerVersion": "Server version",
+  "serverDetailApiVersion": "API version",
+  "serverDetailGenerator": "Generator",
+  "resultOpenLarger": "Open the picture almost full screen",
+  "@resultOpenLarger": {
+    "description": "Accessibility label for tapping the result picture, which opens it nearly full screen (T-0210)."
+  },
+  "serverDetailReconnectAttempts": "Reconnect attempts",
+  "@serverDetailReconnectAttempts": {
+    "description": "Label for the number of automatic reconnect attempts, chosen with a − / + stepper beside it (docs/recovery.md, T-0212)."
+  },
+  "reconnectAttemptsFewer": "Fewer reconnect attempts",
+  "reconnectAttemptsMore": "More reconnect attempts",
+  "serverApiVersionValue": "{server} (this app speaks {client})",
+  "@serverApiVersionValue": {
+    "placeholders": {
+      "server": { "type": "String" },
+      "client": { "type": "String" }
+    }
+  },
+  "generatorRunning": "Running",
+  "generatorStarting": "Starting up",
+  "generatorNotRunning": "Not running",
+  "generatorUnknown": "Unknown",
+
+  "workflowsEmptyTitle": "Nothing to create with yet",
+  "workflowsEmptyBody": "{serverName} has no workflows to offer. They are chosen on the computer running it, and appear here once it publishes them.",
+  "@workflowsEmptyBody": {
+    "placeholders": { "serverName": { "type": "String" } }
+  },
+  "thisServer": "This server",
+  "@thisServer": {
+    "description": "Stands in for the server's own name in the empty state. Used as the subject of a sentence."
+  },
+
+  "creationIdleChosenTitle": "Ready when you are",
+  "creationIdleChosenBody": "What you generate with {workflowName} appears here.",
+  "@creationIdleChosenBody": {
+    "placeholders": { "workflowName": { "type": "String" } }
+  },
+  "creationIdleUnchosenTitle": "Pick something to create",
+  "creationIdleUnchosenBody": "Choose a workflow to see what it can do and what it needs from you.",
+  "chooseAWorkflow": "Choose a workflow",
+
+  "missingWorkflowTitle": "“{workflowName}” is no longer on this server.",
+  "@missingWorkflowTitle": {
+    "placeholders": { "workflowName": { "type": "String" } }
+  },
+  "missingWorkflowBody": "Nothing was chosen in its place. What you typed is still here — pick another workflow to use it.",
+
+  "defaultsSavedFor": "Settings saved as your defaults for {workflowName}.",
+  "@defaultsSavedFor": {
+    "placeholders": { "workflowName": { "type": "String" } }
+  },
+  "setupSavedAs": "Saved as “{name}”.",
+  "@setupSavedAs": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "setupIsGone": "“{name}” is gone.",
+  "@setupIsGone": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+
+  "profileTitle": "Your profile",
+  "profileNote": "Your saved settings and setups, as one file you can move to another phone. Nothing about this server, and nothing you have generated, is in it.",
+  "@profileNote": {
+    "description": "Contractual (docs/privacy-security.md). It must claim exactly what the exported document holds and exactly what it does not. Neither half may be softened or widened."
+  },
+  "profileExport": "Export my profile",
+  "profileImport": "Import a profile",
+  "profileFileTypeLabel": "LocalCanvas profile",
+  "@profileFileTypeLabel": {
+    "description": "What the system's own document picker calls this kind of file, on the way in."
+  },
+  "profileImportedNothing": "That profile had nothing in it.",
+  "profileImported": "Imported {what}. Nothing of yours was removed. Use \"Reset settings to my defaults\" to apply them here.",
+  "@profileImported": {
+    "placeholders": { "what": { "type": "String" } }
+  },
+  "profileImportedWorkflows": "{count, plural, =1{settings for 1 workflow} other{settings for {count} workflows}}",
+  "@profileImportedWorkflows": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "profileImportedSetups": "{count, plural, =1{1 setup} other{{count} setups}}",
+  "@profileImportedSetups": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "profileNotAProfileTitle": "That file is not a LocalCanvas profile.",
+  "profileNotAProfileMessage": "Choose the file an export produced. It is a .json file and it starts by saying what it is.",
+  "profileNewerTitle": "That profile is from a newer LocalCanvas.",
+  "profileNewerMessage": "It is a version {found} profile and this app reads version {supported}. Nothing was changed on this device. Update LocalCanvas, then import it again.",
+  "@profileNewerMessage": {
+    "placeholders": {
+      "found": { "type": "int" },
+      "supported": { "type": "int" }
+    }
+  },
+
+  "didntWorkTitle": "That didn't work.",
+  "tryAgainMessage": "Try again.",
+
+  "exportAccessDeniedTitle": "LocalCanvas can't save to your gallery.",
+  "exportAccessDeniedMessage": "Allow it to add photos and videos in Android settings, then try again.",
+  "exportNotEnoughSpaceTitle": "There is not enough space to save this.",
+  "exportNotEnoughSpaceMessage": "Free some space on this device, then try again.",
+  "exportUnsupportedFormatTitle": "Your gallery could not take this file.",
+  "exportUnsupportedFormatMessage": "The server produced a kind of file the gallery does not accept. Share it instead to keep it.",
+  "exportSavedToGallery": "Saved to your gallery.",
+
+  "serverDidntAnswerTitle": "The server didn't answer.",
+  "serverUnreachableMessage": "It may have gone off the network or been stopped. Check that it is running, then try again.",
+  "serverUnreadableTitle": "The server's answer could not be read.",
+  "serverUnreadableMessage": "This app and the server may be different versions. Try again, and update whichever of the two is older if it keeps happening.",
+  "serverRefusedTitle": "The server could not do that.",
+  "serverRefusedNoReason": "The server did not say why.",
+  "@serverRefusedNoReason": {
+    "description": "A refusal that carried neither a known code nor a sentence to quote."
+  },
+
+  "mediaUploadUnreachableTitle": "The server didn't take the upload.",
+  "mediaUploadRefusedTitle": "The server could not take that file.",
+  "mediaNotAllowedTitle": "That file could not be opened.",
+  "mediaNotAllowedMessage": "Choose it again, and allow LocalCanvas to read it when Android asks.",
+  "mediaGoneTitle": "That file is no longer available.",
+  "mediaGoneMessage": "Choose it again.",
+
+  "gatewayErrorUnsupportedMediaType": "This server does not accept that kind of file.",
+  "gatewayErrorUnsupportedImageHeic": "That photo is in HEIC format, which LocalCanvas cannot use yet. Choose a JPEG or PNG, or turn off high-efficiency (HEIC) photos in the camera settings.",
+  "gatewayErrorEmptyUpload": "That file is empty.",
+  "gatewayErrorInvalidFilename": "That file's name cannot be used. Rename it, then choose it again.",
+  "gatewayErrorFileTooLarge": "That file is larger than this server accepts. Choose a smaller one.",
+  "gatewayErrorMediaKindMismatch": "That file is not the kind this field asks for.",
+  "gatewayErrorWorkflowNotFound": "That workflow is no longer on this server.",
+
+  "mediaNeedsPicture": "This workflow works from a picture you choose.",
+  "mediaNeedsClip": "This workflow works from a clip you choose.",
+  "mediaCannotChoose": "Choosing one is not available on this device.",
+  "mediaChoosePicture": "Choose picture",
+  "mediaChooseClip": "Choose clip",
+  "mediaReadyToUse": "Ready to use",
+  "mediaChosenPicture": "Chosen picture",
+  "mediaChosenClip": "Chosen clip",
+  "mediaNounPicture": "picture",
+  "mediaNounClip": "clip",
+  "mediaUploading": "Uploading…",
+  "mediaFinishing": "Finishing…",
+  "mediaUploadingProgress": "Uploading… {sent} of {total}",
+  "@mediaUploadingProgress": {
+    "placeholders": {
+      "sent": { "type": "String" },
+      "total": { "type": "String" }
+    }
+  },
+
+  "byteCount": "{count, plural, =1{1 byte} other{{count} bytes}}",
+  "@byteCount": {
+    "description": "A size under a kilobyte, where a phone gallery would say the plain number.",
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "byteSize": "{amount} {unit}",
+  "@byteSize": {
+    "placeholders": {
+      "amount": { "type": "String" },
+      "unit": { "type": "String" }
+    }
+  },
+  "byteUnitKilo": "kB",
+  "byteUnitMega": "MB",
+  "byteUnitGiga": "GB",
+  "byteUnitTera": "TB",
+
+  "generationUploadingTitle": "Sending this to the server…",
+  "generationUploadingMessage": "Your inputs are on their way.",
+  "generationQueuedTitle": "Waiting in the queue",
+  "generationQueuedMessage": "The server has it and has not started yet.",
+  "generationGeneratingTitle": "Generating",
+  "generationTakesAWhile": "This can take a while.",
+  "generationCancelledTitle": "Cancelled.",
+  "generationCancelledMessage": "Nothing was generated.",
+  "generationFailedTitle": "That generation didn't finish.",
+  "generationStopping": "Stopping…",
+  "generationCancel": "Cancel",
+  "@generationCancel": {
+    "description": "Stops a generation that is running. A verb, not the way out of a dialog."
+  },
+  "generateAgain": "Generate Again",
+  "generationSaveAsSetup": "Save as a setup",
+  "resultPreviousResult": "Previous result",
+  "resultNextResult": "Next result",
+  "resultHistoryPosition": "{position} of {total}",
+  "@resultHistoryPosition": {
+    "description": "Which of this session's results is on screen. Positions count from the oldest still kept.",
+    "placeholders": { "position": { "type": "int" }, "total": { "type": "int" } }
+  },
+  "generationFinishedTitle": "Finished.",
+  "generationNoOutput": "The server reported no output for this generation.",
+  "generationClipReadyTitle": "Your clip is ready.",
+  "generationClipReadyMessage": "Save it or share it to watch it.",
+  "generationPreviewFailedTitle": "The picture couldn't be fetched.",
+  "generationClipFetchFailedTitle": "The clip couldn't be fetched.",
+  "clipPlay": "Play",
+  "clipPause": "Pause",
+  "clipSoundOn": "Turn the sound on",
+  "clipSoundOff": "Turn the sound off",
+  "clipOpenLarger": "Open the clip almost full screen",
+  "clipCannotPlayTitle": "This phone can't play the clip.",
+  "clipCannotPlayMessage": "It is still yours: Save and Share work as usual.",
+  "@clipCannotPlayMessage": {
+    "description": "Shown when the device's video decoder refuses a result clip (T-0211). The bytes are fine, so saving and sharing still work."
+  },
+  "generationProgressStep": "Step {step} of {total}",
+  "@generationProgressStep": {
+    "placeholders": {
+      "step": { "type": "int" },
+      "total": { "type": "int" }
+    }
+  },
+  "reconnecting": "Reconnecting…",
+  "connectionLostTitle": "Connection lost.",
+  "@connectionLostTitle": {
+    "description": "Contractual (docs/recovery.md). The English half is quoted from the contract word for word."
+  },
+  "checkingSurvival": "Checking whether the generation survived.",
+  "@checkingSurvival": {
+    "description": "Contractual (docs/recovery.md), quoted word for word. Drawn only while a check is actually running."
+  },
+  "survivalUnknown": "The server is still unreachable, so whether the generation survived is unknown. Reconnect, or choose another server.",
+  "stateUnrecoverable": "Generation state could not be recovered.",
+  "@stateUnrecoverable": {
+    "description": "Contractual (docs/recovery.md), quoted word for word."
+  },
+  "generationLostMessage": "The server no longer has this generation. Your inputs are still here, so you can start it again.",
+
+  "fieldRequired": "Required",
+  "formAdvanced": "Advanced",
+  "formAdvancedCount": "{count, plural, =1{1 setting} other{{count} settings}}",
+  "@formAdvancedCount": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "generate": "Generate",
+  "saveMyDefaults": "Save settings as my defaults",
+  "resetToMyDefaults": "Reset settings to my defaults",
+  "resetToWorkflowDefaults": "Reset settings to workflow defaults",
+  "useExample": "Use example",
+  "replaceWrittenTextTitle": "Replace what you wrote?",
+  "useExampleConfirmBody": "The example would take the place of the text in {fieldLabel}.",
+  "@useExampleConfirmBody": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "keepWrittenText": "Keep mine",
+  "fieldRandom": "Random",
+  "@fieldRandom": {
+    "description": "Puts a new random value in the seed field, beside a dice icon. Take the ordinary way your language says 'do this at random' rather than translating the English word for the quality of being random -- a word that means 'by accident' is the opposite of a button somebody presses on purpose. It need not be an imperative: the Russian is not one. An imperative was tried there and rejected on layout, not on register, because the row it sits in has no room to spare (T-0153); revisit it when that row is fixed."
+  },
+  "freezeSeed": "Freeze seed",
+  "freezeSeedOn": "Generate Again reuses this seed.",
+  "freezeSeedOff": "Generate Again uses a new seed.",
+  "unsupportedInput": "This app version cannot show this kind of input yet.",
+  "quoteHint": "Text inside \"quotes\" is preserved.",
+  "@quoteHint": {
+    "description": "The gateway honours straight ASCII double quotes and nothing else, so the quotation marks in this sentence must stay \" in every locale even where the language would ordinarily use its own."
+  },
+
+  "translationSentAsTyped": "This prompt is sent as typed, without translation.",
+  "translationNoLanguages": "This PC is set to translate, but no languages are installed on it. A prompt in another language will fail unless you send it as typed.",
+  "translationNotInstalled": "This PC is set to translate, but the translator is not installed on it. A prompt in another language will fail unless you send it as typed.",
+  "translationGeneric": "A prompt in another language is translated before generating.",
+  "translationPair": "A prompt in {from} is translated to {to} before generating.",
+  "@translationPair": {
+    "placeholders": { "from": { "type": "String" }, "to": { "type": "String" } }
+  },
+  "translationOrSeparator": " or ",
+  "@translationOrSeparator": {
+    "description": "Between the source-language labels the server offers: RU or JA."
+  },
+  "translationApplied": "Translated for this generation",
+  "translationOriginal": "Original",
+  "translationSentToWorkflow": "Sent to workflow",
+
+  "issueNotAWholeNumber": "{fieldLabel} has to be a whole number.",
+  "@issueNotAWholeNumber": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "issueNotANumber": "{fieldLabel} has to be a number.",
+  "@issueNotANumber": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "issueOutOfRange": "{fieldLabel} has to be {range}.",
+  "@issueOutOfRange": {
+    "placeholders": {
+      "fieldLabel": { "type": "String" },
+      "range": { "type": "String" }
+    }
+  },
+  "issueMissing": "{fieldLabel} is needed before you can generate.",
+  "@issueMissing": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "issueNotSelectableYet": "{fieldLabel} is needed, and choosing one is not available on this device.",
+  "@issueNotSelectableYet": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "issueMediaUploading": "{fieldLabel} is still uploading.",
+  "@issueMediaUploading": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "issueMediaFailed": "{fieldLabel} did not reach the server. {detail}",
+  "@issueMediaFailed": {
+    "placeholders": {
+      "fieldLabel": { "type": "String" },
+      "detail": { "type": "String" }
+    }
+  },
+  "issueUnsupportedType": "{fieldLabel} is a kind of input this version of the app cannot show yet.",
+  "@issueUnsupportedType": {
+    "placeholders": { "fieldLabel": { "type": "String" } }
+  },
+  "generateNeeds": "Generate needs {fieldNames}.",
+  "@generateNeeds": {
+    "placeholders": { "fieldNames": { "type": "String" } }
+  },
+  "generateBlockedNotSelectable": "Choosing a picture or a clip is not available on this device.",
+  "generateBlockedUnsupported": "This workflow asks for something this app version cannot show yet.",
+  "generateBlockedBusy": "Generate is unavailable until this generation finishes.",
+
+  "rangeBetween": "between {min} and {max}",
+  "@rangeBetween": {
+    "placeholders": { "min": { "type": "String" }, "max": { "type": "String" } }
+  },
+  "rangeAtLeast": "{min} or more",
+  "@rangeAtLeast": {
+    "placeholders": { "min": { "type": "String" } }
+  },
+  "rangeAtMost": "{max} or less",
+  "@rangeAtMost": {
+    "placeholders": { "max": { "type": "String" } }
+  },
+  "rangeAnyNumber": "a number",
+
+  "durationReading": "{seconds} s at {fps} fps",
+  "@durationReading": {
+    "description": "A frame count read back as a length. The numbers keep the digits and the decimal point the workflow itself uses, in every locale, so what is read matches what is submitted.",
+    "placeholders": { "seconds": { "type": "String" }, "fps": { "type": "String" } }
+  },
+  "durationReadingApproximate": "≈ {seconds} s at {fps} fps",
+  "@durationReadingApproximate": {
+    "placeholders": { "seconds": { "type": "String" }, "fps": { "type": "String" } }
+  },
+
+  "workflowPickerTitle": "Choose a workflow",
+  "workflowsRefresh": "Refresh the list",
+  "@workflowsRefresh": {
+    "description": "Tooltip of the picker's button that reads the workflow list from the PC again, for a workflow added there while the app was open."
+  },
+  "workflowCount": "{count, plural, =1{1 workflow} other{{count} workflows}}",
+  "@workflowCount": {
+    "placeholders": { "count": { "type": "int" } }
+  },
+  "workflowGroupOther": "Other",
+  "@workflowGroupOther": {
+    "description": "The heading over workflows that declared no group of their own."
+  },
+  "workflowFilterAll": "All",
+  "@workflowFilterAll": {
+    "description": "The picker filter's first option, and its default: every workflow, whatever group it is in. Every other option is a group name the gateway served and is never translated."
+  },
+  "workflowWhatThisDoes": "What this does",
+  "helpWhatItNeeds": "What it needs",
+  "helpBestFor": "Best for",
+  "helpHowToUse": "How to use it",
+  "helpExamplePrompt": "Example prompt",
+  "helpNotIdealFor": "Not ideal for",
+  "helpDefaults": "Defaults",
+
+  "setupsHeading": "Setups",
+  "setupSaveWithProse": "Save prompt and settings as a setup",
+  "setupSaveSettingsOnly": "Save settings as a setup",
+  "setupNameTitle": "Name this setup",
+  "setupRenameTitle": "Rename this setup",
+  "setupNameLabel": "Name",
+  "setupApplyBody": "“{name}” would take the place of the text you have written in this form.",
+  "@setupApplyBody": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "setupForgetTitle": "Forget this setup?",
+  "setupForgetBody": "“{name}” would be gone. What is in the form now is not touched either way.",
+  "@setupForgetBody": {
+    "placeholders": { "name": { "type": "String" } }
+  },
+  "setupKeepIt": "Keep it",
+  "setupRenameTooltip": "Rename",
+  "setupDeleteTooltip": "Delete"
+}

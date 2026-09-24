@@ -1,0 +1,695 @@
+{
+  "example_img2img": {
+    "detail_view": {
+      "id": "example_img2img",
+      "inputs": [
+        {
+          "help": "The picture to work from.",
+          "id": "source_image",
+          "label": "Source image",
+          "required": true,
+          "section": "main",
+          "type": "image"
+        },
+        {
+          "help": "Describe what you want to see. More detail gives more to go on.",
+          "id": "prompt",
+          "label": "Prompt",
+          "required": true,
+          "section": "main",
+          "type": "multiline"
+        },
+        {
+          "default": 0.55,
+          "help": "How much of the starting picture is redrawn. Lower keeps more of it.",
+          "id": "strength",
+          "label": "Strength",
+          "max": 1.0,
+          "min": 0.0,
+          "required": false,
+          "section": "main",
+          "step": 0.05,
+          "type": "float"
+        },
+        {
+          "default": "",
+          "id": "negative_prompt",
+          "label": "Avoid",
+          "required": false,
+          "section": "advanced",
+          "type": "multiline"
+        },
+        {
+          "default": 20,
+          "id": "steps",
+          "label": "Steps",
+          "max": 50,
+          "min": 1,
+          "required": false,
+          "section": "advanced",
+          "type": "integer"
+        },
+        {
+          "default": 0,
+          "id": "seed",
+          "label": "Seed",
+          "max": 4294967295,
+          "min": 0,
+          "required": false,
+          "role": "seed",
+          "section": "advanced",
+          "type": "integer"
+        },
+        {
+          "default": "LocalCanvas",
+          "help": "The prefix your saved files get.",
+          "id": "output_name",
+          "label": "Output name",
+          "required": false,
+          "section": "advanced",
+          "type": "string"
+        }
+      ],
+      "name": "Example Image to Image",
+      "presentation": {
+        "badge": "IMG2IMG",
+        "best_for": [
+          "Learning how an image input is declared",
+          "Restyling an existing picture"
+        ],
+        "category": "Example",
+        "example_prompt": "The same scene at golden hour, warm rim light",
+        "group": "Edit",
+        "how_to_use": "Pick a picture, then describe what should change. Strength decides how far the result may travel from the original: low keeps the composition, high rewrites it.",
+        "input_summary": "Image and prompt",
+        "not_ideal_for": [
+          "Generating from nothing - use the prompt-only example for that"
+        ],
+        "short_description": "An example that reworks a picture you choose, guided by a prompt."
+      },
+      "required_media": [
+        "image"
+      ]
+    },
+    "field_views": [
+      {
+        "help": "The picture to work from.",
+        "id": "source_image",
+        "label": "Source image",
+        "required": true,
+        "section": "main",
+        "type": "image"
+      },
+      {
+        "help": "Describe what you want to see. More detail gives more to go on.",
+        "id": "prompt",
+        "label": "Prompt",
+        "required": true,
+        "section": "main",
+        "type": "multiline"
+      },
+      {
+        "default": 0.55,
+        "help": "How much of the starting picture is redrawn. Lower keeps more of it.",
+        "id": "strength",
+        "label": "Strength",
+        "max": 1.0,
+        "min": 0.0,
+        "required": false,
+        "section": "main",
+        "step": 0.05,
+        "type": "float"
+      },
+      {
+        "default": "",
+        "id": "negative_prompt",
+        "label": "Avoid",
+        "required": false,
+        "section": "advanced",
+        "type": "multiline"
+      },
+      {
+        "default": 20,
+        "id": "steps",
+        "label": "Steps",
+        "max": 50,
+        "min": 1,
+        "required": false,
+        "section": "advanced",
+        "type": "integer"
+      },
+      {
+        "default": 0,
+        "id": "seed",
+        "label": "Seed",
+        "max": 4294967295,
+        "min": 0,
+        "required": false,
+        "role": "seed",
+        "section": "advanced",
+        "type": "integer"
+      },
+      {
+        "default": "LocalCanvas",
+        "help": "The prefix your saved files get.",
+        "id": "output_name",
+        "label": "Output name",
+        "required": false,
+        "section": "advanced",
+        "type": "string"
+      }
+    ],
+    "presentation_view": {
+      "badge": "IMG2IMG",
+      "best_for": [
+        "Learning how an image input is declared",
+        "Restyling an existing picture"
+      ],
+      "category": "Example",
+      "example_prompt": "The same scene at golden hour, warm rim light",
+      "group": "Edit",
+      "how_to_use": "Pick a picture, then describe what should change. Strength decides how far the result may travel from the original: low keeps the composition, high rewrites it.",
+      "input_summary": "Image and prompt",
+      "not_ideal_for": [
+        "Generating from nothing - use the prompt-only example for that"
+      ],
+      "short_description": "An example that reworks a picture you choose, guided by a prompt."
+    },
+    "summary_view": {
+      "id": "example_img2img",
+      "name": "Example Image to Image",
+      "presentation": {
+        "badge": "IMG2IMG",
+        "best_for": [
+          "Learning how an image input is declared",
+          "Restyling an existing picture"
+        ],
+        "category": "Example",
+        "example_prompt": "The same scene at golden hour, warm rim light",
+        "group": "Edit",
+        "how_to_use": "Pick a picture, then describe what should change. Strength decides how far the result may travel from the original: low keeps the composition, high rewrites it.",
+        "input_summary": "Image and prompt",
+        "not_ideal_for": [
+          "Generating from nothing - use the prompt-only example for that"
+        ],
+        "short_description": "An example that reworks a picture you choose, guided by a prompt."
+      },
+      "required_media": [
+        "image"
+      ]
+    }
+  },
+  "example_txt2img": {
+    "detail_view": {
+      "id": "example_txt2img",
+      "inputs": [
+        {
+          "help": "Describe what you want to see. More detail gives more to go on.",
+          "id": "prompt",
+          "label": "Prompt",
+          "required": true,
+          "section": "main",
+          "type": "multiline"
+        },
+        {
+          "default": "",
+          "help": "What to keep out of the result. Leave it empty if nothing comes to mind.",
+          "id": "negative_prompt",
+          "label": "Avoid",
+          "required": false,
+          "section": "advanced",
+          "type": "multiline"
+        },
+        {
+          "default": 768,
+          "id": "width",
+          "label": "Width",
+          "max": 2048,
+          "min": 256,
+          "pair": "width",
+          "required": false,
+          "section": "main",
+          "step": 64,
+          "type": "integer"
+        },
+        {
+          "default": 768,
+          "id": "height",
+          "label": "Height",
+          "max": 2048,
+          "min": 256,
+          "pair": "height",
+          "required": false,
+          "section": "main",
+          "step": 64,
+          "type": "integer"
+        },
+        {
+          "default": 20,
+          "help": "How much work goes into the result. More steps, more detail, more waiting.",
+          "id": "steps",
+          "label": "Steps",
+          "max": 50,
+          "min": 1,
+          "required": false,
+          "section": "advanced",
+          "type": "integer"
+        },
+        {
+          "default": 6.0,
+          "help": "How closely your words are followed. Too high looks harsh and overcooked.",
+          "id": "guidance",
+          "label": "Guidance",
+          "max": 20.0,
+          "min": 1.0,
+          "required": false,
+          "section": "advanced",
+          "step": 0.5,
+          "type": "float"
+        },
+        {
+          "default": "euler",
+          "help": "The method used to build the picture. Each has a slightly different look.",
+          "id": "sampler",
+          "label": "Sampler",
+          "options": [
+            {
+              "label": "Euler",
+              "value": "euler"
+            },
+            {
+              "label": "Euler ancestral",
+              "value": "euler_ancestral"
+            },
+            {
+              "label": "DPM++ 2M",
+              "value": "dpmpp_2m"
+            }
+          ],
+          "required": false,
+          "section": "advanced",
+          "type": "select"
+        },
+        {
+          "default": 0,
+          "help": "The starting point for the randomness. The same number repeats a result.",
+          "id": "seed",
+          "label": "Seed",
+          "max": 4294967295,
+          "min": 0,
+          "required": false,
+          "role": "seed",
+          "section": "advanced",
+          "type": "integer"
+        }
+      ],
+      "name": "Example Text to Image",
+      "presentation": {
+        "badge": "TXT2IMG",
+        "best_for": [
+          "Learning what a LocalCanvas workflow definition looks like",
+          "Starting your own prompt-only workflow"
+        ],
+        "category": "Example",
+        "example_prompt": "A rainy alley at night, cinematic lighting, wet asphalt reflections",
+        "group": "Create",
+        "how_to_use": "Describe what you want in the Prompt field. Everything else has a default that works, and lives under Advanced.",
+        "input_summary": "Prompt only",
+        "not_ideal_for": [
+          "Anything that starts from an existing image or video"
+        ],
+        "short_description": "A prompt-only example showing the smallest complete workflow definition."
+      },
+      "required_media": []
+    },
+    "field_views": [
+      {
+        "help": "Describe what you want to see. More detail gives more to go on.",
+        "id": "prompt",
+        "label": "Prompt",
+        "required": true,
+        "section": "main",
+        "type": "multiline"
+      },
+      {
+        "default": "",
+        "help": "What to keep out of the result. Leave it empty if nothing comes to mind.",
+        "id": "negative_prompt",
+        "label": "Avoid",
+        "required": false,
+        "section": "advanced",
+        "type": "multiline"
+      },
+      {
+        "default": 768,
+        "id": "width",
+        "label": "Width",
+        "max": 2048,
+        "min": 256,
+        "pair": "width",
+        "required": false,
+        "section": "main",
+        "step": 64,
+        "type": "integer"
+      },
+      {
+        "default": 768,
+        "id": "height",
+        "label": "Height",
+        "max": 2048,
+        "min": 256,
+        "pair": "height",
+        "required": false,
+        "section": "main",
+        "step": 64,
+        "type": "integer"
+      },
+      {
+        "default": 20,
+        "help": "How much work goes into the result. More steps, more detail, more waiting.",
+        "id": "steps",
+        "label": "Steps",
+        "max": 50,
+        "min": 1,
+        "required": false,
+        "section": "advanced",
+        "type": "integer"
+      },
+      {
+        "default": 6.0,
+        "help": "How closely your words are followed. Too high looks harsh and overcooked.",
+        "id": "guidance",
+        "label": "Guidance",
+        "max": 20.0,
+        "min": 1.0,
+        "required": false,
+        "section": "advanced",
+        "step": 0.5,
+        "type": "float"
+      },
+      {
+        "default": "euler",
+        "help": "The method used to build the picture. Each has a slightly different look.",
+        "id": "sampler",
+        "label": "Sampler",
+        "options": [
+          {
+            "label": "Euler",
+            "value": "euler"
+          },
+          {
+            "label": "Euler ancestral",
+            "value": "euler_ancestral"
+          },
+          {
+            "label": "DPM++ 2M",
+            "value": "dpmpp_2m"
+          }
+        ],
+        "required": false,
+        "section": "advanced",
+        "type": "select"
+      },
+      {
+        "default": 0,
+        "help": "The starting point for the randomness. The same number repeats a result.",
+        "id": "seed",
+        "label": "Seed",
+        "max": 4294967295,
+        "min": 0,
+        "required": false,
+        "role": "seed",
+        "section": "advanced",
+        "type": "integer"
+      }
+    ],
+    "presentation_view": {
+      "badge": "TXT2IMG",
+      "best_for": [
+        "Learning what a LocalCanvas workflow definition looks like",
+        "Starting your own prompt-only workflow"
+      ],
+      "category": "Example",
+      "example_prompt": "A rainy alley at night, cinematic lighting, wet asphalt reflections",
+      "group": "Create",
+      "how_to_use": "Describe what you want in the Prompt field. Everything else has a default that works, and lives under Advanced.",
+      "input_summary": "Prompt only",
+      "not_ideal_for": [
+        "Anything that starts from an existing image or video"
+      ],
+      "short_description": "A prompt-only example showing the smallest complete workflow definition."
+    },
+    "summary_view": {
+      "id": "example_txt2img",
+      "name": "Example Text to Image",
+      "presentation": {
+        "badge": "TXT2IMG",
+        "best_for": [
+          "Learning what a LocalCanvas workflow definition looks like",
+          "Starting your own prompt-only workflow"
+        ],
+        "category": "Example",
+        "example_prompt": "A rainy alley at night, cinematic lighting, wet asphalt reflections",
+        "group": "Create",
+        "how_to_use": "Describe what you want in the Prompt field. Everything else has a default that works, and lives under Advanced.",
+        "input_summary": "Prompt only",
+        "not_ideal_for": [
+          "Anything that starts from an existing image or video"
+        ],
+        "short_description": "A prompt-only example showing the smallest complete workflow definition."
+      },
+      "required_media": []
+    }
+  },
+  "example_video": {
+    "detail_view": {
+      "id": "example_video",
+      "inputs": [
+        {
+          "help": "The clip to work from.",
+          "id": "source_video",
+          "label": "Source clip",
+          "required": true,
+          "section": "main",
+          "type": "video"
+        },
+        {
+          "help": "Describe what you want to see. More detail gives more to go on.",
+          "id": "prompt",
+          "label": "Prompt",
+          "required": true,
+          "section": "main",
+          "type": "multiline"
+        },
+        {
+          "default": 48,
+          "help": "How many frames of the clip to use. Fewer frames finish sooner.",
+          "id": "frames",
+          "label": "Frames",
+          "max": 128,
+          "min": 8,
+          "required": false,
+          "section": "main",
+          "step": 8,
+          "type": "integer"
+        },
+        {
+          "default": 0.6,
+          "help": "How much movement the result may invent.",
+          "id": "motion",
+          "label": "Motion",
+          "max": 1.0,
+          "min": 0.0,
+          "required": false,
+          "section": "advanced",
+          "step": 0.05,
+          "type": "float"
+        },
+        {
+          "default": 20,
+          "id": "steps",
+          "label": "Steps",
+          "max": 50,
+          "min": 1,
+          "required": false,
+          "section": "advanced",
+          "type": "integer"
+        },
+        {
+          "default": 0,
+          "id": "seed",
+          "label": "Seed",
+          "max": 4294967295,
+          "min": 0,
+          "required": false,
+          "role": "seed",
+          "section": "advanced",
+          "type": "integer"
+        },
+        {
+          "default": 16,
+          "id": "fps",
+          "label": "Frames per second",
+          "max": 60,
+          "min": 1,
+          "required": false,
+          "section": "advanced",
+          "type": "integer"
+        },
+        {
+          "default": false,
+          "help": "Write the clip so that it plays back as a loop.",
+          "id": "loop",
+          "label": "Loop the result",
+          "required": false,
+          "section": "advanced",
+          "type": "boolean"
+        }
+      ],
+      "name": "Example Video to Video",
+      "presentation": {
+        "badge": "VIDEO",
+        "best_for": [
+          "Learning how a video input is declared",
+          "Short clips of a few seconds"
+        ],
+        "category": "Example",
+        "example_prompt": "The same shot as an ink drawing, strong outlines",
+        "group": "Video",
+        "how_to_use": "Pick a clip, describe what should change, and keep the frame count low while you are trying things out - video is slow.",
+        "input_summary": "Video and prompt",
+        "not_ideal_for": [
+          "Long clips",
+          "Anything you need quickly"
+        ],
+        "short_description": "An example that reworks a short clip you choose, guided by a prompt."
+      },
+      "required_media": [
+        "video"
+      ]
+    },
+    "field_views": [
+      {
+        "help": "The clip to work from.",
+        "id": "source_video",
+        "label": "Source clip",
+        "required": true,
+        "section": "main",
+        "type": "video"
+      },
+      {
+        "help": "Describe what you want to see. More detail gives more to go on.",
+        "id": "prompt",
+        "label": "Prompt",
+        "required": true,
+        "section": "main",
+        "type": "multiline"
+      },
+      {
+        "default": 48,
+        "help": "How many frames of the clip to use. Fewer frames finish sooner.",
+        "id": "frames",
+        "label": "Frames",
+        "max": 128,
+        "min": 8,
+        "required": false,
+        "section": "main",
+        "step": 8,
+        "type": "integer"
+      },
+      {
+        "default": 0.6,
+        "help": "How much movement the result may invent.",
+        "id": "motion",
+        "label": "Motion",
+        "max": 1.0,
+        "min": 0.0,
+        "required": false,
+        "section": "advanced",
+        "step": 0.05,
+        "type": "float"
+      },
+      {
+        "default": 20,
+        "id": "steps",
+        "label": "Steps",
+        "max": 50,
+        "min": 1,
+        "required": false,
+        "section": "advanced",
+        "type": "integer"
+      },
+      {
+        "default": 0,
+        "id": "seed",
+        "label": "Seed",
+        "max": 4294967295,
+        "min": 0,
+        "required": false,
+        "role": "seed",
+        "section": "advanced",
+        "type": "integer"
+      },
+      {
+        "default": 16,
+        "id": "fps",
+        "label": "Frames per second",
+        "max": 60,
+        "min": 1,
+        "required": false,
+        "section": "advanced",
+        "type": "integer"
+      },
+      {
+        "default": false,
+        "help": "Write the clip so that it plays back as a loop.",
+        "id": "loop",
+        "label": "Loop the result",
+        "required": false,
+        "section": "advanced",
+        "type": "boolean"
+      }
+    ],
+    "presentation_view": {
+      "badge": "VIDEO",
+      "best_for": [
+        "Learning how a video input is declared",
+        "Short clips of a few seconds"
+      ],
+      "category": "Example",
+      "example_prompt": "The same shot as an ink drawing, strong outlines",
+      "group": "Video",
+      "how_to_use": "Pick a clip, describe what should change, and keep the frame count low while you are trying things out - video is slow.",
+      "input_summary": "Video and prompt",
+      "not_ideal_for": [
+        "Long clips",
+        "Anything you need quickly"
+      ],
+      "short_description": "An example that reworks a short clip you choose, guided by a prompt."
+    },
+    "summary_view": {
+      "id": "example_video",
+      "name": "Example Video to Video",
+      "presentation": {
+        "badge": "VIDEO",
+        "best_for": [
+          "Learning how a video input is declared",
+          "Short clips of a few seconds"
+        ],
+        "category": "Example",
+        "example_prompt": "The same shot as an ink drawing, strong outlines",
+        "group": "Video",
+        "how_to_use": "Pick a clip, describe what should change, and keep the frame count low while you are trying things out - video is slow.",
+        "input_summary": "Video and prompt",
+        "not_ideal_for": [
+          "Long clips",
+          "Anything you need quickly"
+        ],
+        "short_description": "An example that reworks a short clip you choose, guided by a prompt."
+      },
+      "required_media": [
+        "video"
+      ]
+    }
+  }
+}

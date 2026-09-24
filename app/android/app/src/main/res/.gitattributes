@@ -1,0 +1,20 @@
+# The launcher icon's assets are generated, and `--check` compares them byte
+# for byte:
+#
+#     python app/tool/generate_launcher_icons.py --check
+#
+# This repository has no line-ending policy of its own, so on Windows git checks
+# text files out with CRLF. That would rewrite the three generated XML files the
+# moment they were cloned, and the check would fail on a clean checkout of code
+# nobody had touched -- the assets would look unreproducible when they are not.
+# Pinning them to LF is what makes "re-running the generator changes nothing"
+# true on every platform.
+ic_launcher.xml             eol=lf
+ic_launcher_background.xml  eol=lf
+ic_launcher_foreground.xml  eol=lf
+
+# Git already detects these as binary; saying so is cheap insurance. An
+# end-of-line conversion applied to a PNG breaks its chunk CRCs, and
+# `gateway/tests/media_fixtures.py` reads mipmap-mdpi/ic_launcher.png off disk
+# and verifies exactly those checksums.
+ic_launcher.png             binary

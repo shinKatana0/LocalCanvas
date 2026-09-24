@@ -1,0 +1,89 @@
+# LocalCanvas workflow sources — EXAMPLE
+#
+# YOU DO NOT HAVE TO COPY THIS FILE EITHER. `pwsh .\scripts\setup.ps1` writes
+# config/local/workflow-sources.yaml for you: it finds ComfyUI's own
+# user/default/workflows folder, and takes -WorkflowSource when your workflows
+# are somewhere else. Running setup again once the source list exists leaves it
+# alone. config/local/ is gitignored, so your real paths never enter the
+# repository.
+#
+# This file is the REFERENCE for what the source list can hold — a second
+# folder, the output locations, the sync options. Read it when you want to
+# change something setup wrote.
+#
+# Then:
+#
+#   .\scripts\sync-workflows.ps1 -DryRun    # look, change nothing
+#   .\scripts\sync-workflows.ps1            # look, and record what was found
+#
+# Workflows saved from ComfyUI's editor are converted by your own running
+# ComfyUI (the one config/local/runtime.yaml points at), so start it first;
+# without it they are reported as needing an API export.
+#
+# Two promises this file is the whole of. **The folders under `sources` are the
+# only folders LocalCanvas ever reads** — it does not scan your machine, does
+# not look above a folder you name, and never follows a path it finds inside a
+# workflow file. And **your workflow files are only ever read**: nothing here
+# renames, moves, deletes, reformats or rewrites one, and nothing LocalCanvas
+# produces is allowed to be written inside a source folder.
+
+sources:
+  # Where your own ComfyUI workflows live. In a default ComfyUI install that is
+  # `user/default/workflows` under the ComfyUI folder; if you keep them
+  # somewhere else, say so here.
+  #
+  # Must be an ABSOLUTE path: a workflow folder lives outside this repository,
+  # so there is nothing a relative path could be measured from. Forward slashes
+  # work on Windows. Paths with spaces are fine.
+  - path: "C:/path/to/ComfyUI/user/default/workflows"
+
+    # true  - read the folders inside it as well.
+    # false - read this one folder only.
+    recursive: true
+
+  # A second folder, if you keep workflows in more than one place. Two folders
+  # may not overlap: if one is inside the other, every file under both would be
+  # found twice.
+  #
+  # - path: "D:/workflows/experiments"
+  #   recursive: false
+
+output:
+  # Everything LocalCanvas produces. Relative paths are measured from the
+  # repository root, so these three work unedited — and they all point inside
+  # config/local/, which is gitignored, so nothing derived from your private
+  # workflows is ever committed.
+  #
+  # None of them may be inside a folder listed under `sources`. That is
+  # refused, with a message saying so: a source folder is yours, and LocalCanvas
+  # writing into it would make the promise above untrue.
+
+  # The workflow definitions LocalCanvas builds for you to review and edit.
+  definitions: "config/local/workflows"
+
+  # LocalCanvas's own copies of the API-format graphs, so that a definition
+  # keeps working when you reorganise your ComfyUI folder.
+  imported_api: "config/local/imported-workflows"
+
+  # What was found last time: one JSON file, so a run can tell you what is new,
+  # what changed and what has gone, rather than starting from nothing.
+  inventory: "config/local/workflow-inventory.json"
+
+sync:
+  # Two files whose content is identical are the same workflow, whatever they
+  # are called. With this on, one of them is recorded as the workflow and the
+  # others are recorded as aliases of it, so it appears once instead of three
+  # times. No file is ever deleted, moved or merged — only recorded.
+  detect_duplicates: true
+
+  # Notice when a workflow that was here last time is not here now, and say so.
+  # Nothing is deleted because of it: the entry stands until you act on it. Turn
+  # this off if your workflow folder lives on a drive you do not always have
+  # plugged in, and you would rather not be told about it every run.
+  detect_removed: true
+
+  # Keep anything you added by hand to an entry in the inventory. LocalCanvas
+  # writes the keys it knows about; any other key you put on an entry is left
+  # exactly as you wrote it. With this off, a run rewrites each entry with only
+  # the keys LocalCanvas knows, and your own notes go.
+  preserve_manual_metadata: true

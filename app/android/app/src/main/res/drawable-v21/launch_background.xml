@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The API 21+ copy of `drawable/launch_background.xml`, which is the one every
+  supported device resolves (minSdk 24). Same single fill of @color/lc_canvas;
+  that file says why this drawable carries no artwork, and what Android 12
+  draws over it regardless.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/lc_canvas" />
+</layer-list>

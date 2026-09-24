@@ -1,0 +1,34 @@
+# Your own configuration. Public templates live in config/examples/.
+config/local/*
+!config/local/.gitkeep
+
+# Runtime state scripts/start.ps1 writes: which processes LocalCanvas started.
+.runtime/
+
+# Python: the gateway's own virtual environment (or one you made yourself),
+# and what pip and pytest write.
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+gateway/build/
+.pytest_cache/
+
+# Flutter, Dart and Gradle output, kept out even if app/ is regenerated.
+app/.dart_tool/
+app/.flutter-plugins-dependencies
+app/build/
+app/android/.gradle/
+app/android/local.properties
+
+# Signing material. None ships; a keystore you create stays out of git.
+app/android/key.properties
+*.jks
+*.keystore
+
+# Editor and operating-system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini

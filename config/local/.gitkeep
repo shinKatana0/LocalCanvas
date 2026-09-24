@@ -1,0 +1,4 @@
+Your machine-specific configuration goes in this folder. Everything here except
+this file is gitignored, so your real paths never enter the repository.
+
+    Copy-Item ../examples/runtime.example.yaml runtime.yaml

@@ -1,0 +1,42 @@
+{
+  "1": {
+    "class_type": "ExampleVideoModelLoader",
+    "inputs": {
+      "model_name": "REPLACE_WITH_YOUR_VIDEO_MODEL.safetensors"
+    }
+  },
+  "2": {
+    "class_type": "ExampleVideoLoader",
+    "inputs": {
+      "video": "PLACEHOLDER_INPUT_VIDEO.mp4",
+      "frame_cap": 48
+    }
+  },
+  "3": {
+    "class_type": "ExampleTextEncoder",
+    "inputs": {
+      "text": "a placeholder prompt",
+      "model": ["1", 0]
+    }
+  },
+  "4": {
+    "class_type": "ExampleVideoSampler",
+    "inputs": {
+      "model": ["1", 0],
+      "conditioning": ["3", 0],
+      "frames": ["2", 0],
+      "seed": 0,
+      "steps": 20,
+      "motion_strength": 0.6
+    }
+  },
+  "5": {
+    "class_type": "ExampleVideoOutput",
+    "inputs": {
+      "frames": ["4", 0],
+      "fps": 16,
+      "loop": false,
+      "filename_prefix": "LocalCanvas"
+    }
+  }
+}

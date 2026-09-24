@@ -1,0 +1,143 @@
+# Example: a prompt-only workflow.
+#
+# This file and example_txt2img_api.json are a complete, valid LocalCanvas
+# workflow. Everything in them is placeholder content: the checkpoint name is an
+# instruction to replace it, and no path here points anywhere on any machine.
+# Copy the pair, point `workflow:` at your own API-format export, and change the
+# node ids in each `bind:` to the ones your export uses.
+
+id: example_txt2img
+name: Example Text to Image
+workflow: example_txt2img_api.json
+
+presentation:
+  group: Create
+  category: Example
+  badge: TXT2IMG
+
+  short_description: >
+    A prompt-only example showing the smallest complete workflow definition.
+
+  best_for:
+    - Learning what a LocalCanvas workflow definition looks like
+    - Starting your own prompt-only workflow
+
+  how_to_use: >
+    Describe what you want in the Prompt field. Everything else has a default
+    that works, and lives under Advanced.
+
+  input_summary: Prompt only
+
+  example_prompt: >
+    A rainy alley at night, cinematic lighting, wet asphalt reflections
+
+  not_ideal_for:
+    - Anything that starts from an existing image or video
+
+inputs:
+  - id: prompt
+    label: Prompt
+    type: multiline
+    required: true
+    section: main
+    # Natural language, so the gateway may translate it before binding
+    # (docs/api.md). Nothing else in this file is translatable.
+    translatable: true
+    help: Describe what you want to see. More detail gives more to go on.
+    bind:
+      node: "20"
+      input: text
+
+  - id: negative_prompt
+    label: Avoid
+    type: multiline
+    section: advanced
+    default: ""
+    help: What to keep out of the result. Leave it empty if nothing comes to mind.
+    bind:
+      node: "21"
+      input: text
+
+  - id: width
+    label: Width
+    type: integer
+    section: main
+    default: 768
+    min: 256
+    max: 2048
+    step: 64
+    pair: width
+    bind:
+      node: "30"
+      input: width
+
+  - id: height
+    label: Height
+    type: integer
+    section: main
+    default: 768
+    min: 256
+    max: 2048
+    step: 64
+    pair: height
+    bind:
+      node: "30"
+      input: height
+
+  # A node id may be written as a number. ComfyUI's API format keys nodes as
+  # JSON strings, so `40` and "40" name the same node; quoting is the clearer
+  # habit, and both are accepted.
+  - id: steps
+    label: Steps
+    type: integer
+    section: advanced
+    default: 20
+    min: 1
+    max: 50
+    help: How much work goes into the result. More steps, more detail, more waiting.
+    bind:
+      node: 40
+      input: steps
+
+  - id: guidance
+    label: Guidance
+    type: float
+    section: advanced
+    default: 6.0
+    min: 1.0
+    max: 20.0
+    step: 0.5
+    help: How closely your words are followed. Too high looks harsh and overcooked.
+    bind:
+      node: "40"
+      input: cfg
+
+  - id: sampler
+    label: Sampler
+    type: select
+    section: advanced
+    default: euler
+    options:
+      - value: euler
+        label: Euler
+      - value: euler_ancestral
+        label: Euler ancestral
+      - value: dpmpp_2m
+        label: DPM++ 2M
+    help: The method used to build the picture. Each has a slightly different look.
+    bind:
+      node: "40"
+      input: sampler_name
+
+  - id: seed
+    label: Seed
+    type: integer
+    section: advanced
+    default: 0
+    min: 0
+    max: 4294967295
+    role: seed
+    help: The starting point for the randomness. The same number repeats a result.
+    bind:
+      node: "40"
+      input: seed

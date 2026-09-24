@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12 and up, light. From API 31 the OS draws a splash screen of its own
+  at cold start, and `android:windowSplashScreenBackground` is the only thing
+  that decides its colour. Leaving it unset leaves that decision to a fallback,
+  so it is set here — to the same canvas as everything else.
+
+  Only the colour. `android:windowSplashScreenAnimatedIcon` is deliberately not
+  set, so the platform centres its default, @mipmap/ic_launcher: on Android 12+
+  the user sees the launcher icon on the app's canvas for that moment, where
+  before this card they would have seen it on white. Suppressing it is not
+  offered by the platform and is not what this card is for.
+
+  This has to be a whole style rather than an override because a style is
+  matched by name per qualifier set, and `values-night/` beats `values-v31/` in
+  Android's qualifier precedence (night mode is eliminated at position 7,
+  platform version last at 14). Hence four copies of two styles, and
+  `app/test/launch_theme_test.dart` asserting that every one of them names
+  @color/lc_canvas.
+-->
+<resources>
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:colorBackground">@color/lc_canvas</item>
+        <item name="android:windowSplashScreenBackground">@color/lc_canvas</item>
+    </style>
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@color/lc_canvas</item>
+        <item name="android:colorBackground">@color/lc_canvas</item>
+    </style>
+</resources>

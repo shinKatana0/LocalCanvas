@@ -1,0 +1,314 @@
+# The Android APK, built by CI so a reader can download one instead of
+# building it.
+#
+# WHAT THIS PRODUCES, AND WHAT IT IS NOT. `flutter build apk --release
+# --split-per-abi` -- the same command `README.md` documents -- so the three
+# files here are the same three a person gets on their own machine, named
+# `LocalCanvas-<version>-<abi>.apk` by the `NameSideloadApks` Gradle task in
+# `app/android/app/build.gradle.kts`.
+#
+# They are **debug-signed**. `app/android/app/build.gradle.kts` gives the
+# release build type `signingConfigs.getByName("debug")`, because this project
+# configures no release signing and deliberately holds no keystore and no
+# signing secret. What comes out of here is therefore a build you sideload, not
+# a verified or distributable release artefact -- and not one a differently
+# signed build could ever update in place. The artefact is named for that fact,
+# so whoever downloads it reads it before they unzip it.
+#
+# WHY THIS IS NOT A STEP IN `ci.yml`. That workflow is the deterministic test
+# suite and answers one question -- is the tree green -- in about as long as the
+# slowest test job takes. A Gradle/Android build takes minutes more and answers
+# a different question. As its own workflow it runs beside CI instead of in
+# front of it, so it delays no test result, and it can have its own trigger:
+# `main` and on demand, not every pull-request push.
+#
+# The debug key is also not one key: Android generates a debug keystore per
+# machine when it finds none, so a CI runner's differs from a developer's and,
+# a fresh runner each time, from the previous run's. Two APKs from here are
+# therefore not guaranteed to be an update of one another -- uninstall before
+# installing the next one if Android refuses it.
+#
+# MEASURED, 2026-09-20, on a developer machine and NOT on a runner -- Flutter
+# 3.47.0, warm pub and Gradle caches, empty app/build: `flutter build apk
+# --release --split-per-abi` took 7m36s wall (Gradle's own assembleRelease
+# 449.1s) and produced the three files below at version 0.1.5. What the same
+# build costs on windows-latest, which also downloads the Flutter SDK and
+# resolves Gradle from cold, is not knowable from here; the first run of this
+# workflow is what measures it.
+#
+# Nothing here uses a secret, creates a keystore, makes a tag or a release, or
+# uploads anywhere outside this repository's own run artefacts. Like `ci.yml`,
+# it leaves LOCALCANVAS_INTEGRATION unset and talks to no real ComfyUI, no
+# developer's network and no self-hosted machine; the only hosts it reaches are
+# the toolchain's own -- pub.dev, Maven, the Flutter SDK and the Android SDK.
+
+name: APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    name: Android APK (debug-signed)
+    runs-on: windows-latest
+    # Longer than ci.yml's 30: a cold runner downloads the Gradle distribution,
+    # the AGP dependencies and the Flutter SDK before it compiles anything.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned rather than left to the image's default: the release build type
+      # compiles at Java 17 and Kotlin targets JVM 17
+      # (app/android/app/build.gradle.kts), and which JDK a runner image makes
+      # default has changed before.
+      #
+      # v5, not v4: setup-java's own action.yml carries, at v4,
+      # `deprecationMessage: 'setup-java v4 is deprecated and will no longer
+      # receive updates. Please migrate to actions/setup-java@v5.'`, which every
+      # run would print as an annotation. v5 declares the same two inputs this
+      # step passes.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The same pin as ci.yml's app job: app/.metadata records stable revision
+      # 4cf24164269a5ebf0c16a028a00727d0e77bbb05, which is Flutter 3.47.0
+      # (Dart 3.13.0); app/pubspec.lock needs >=3.44.0.
+      #
+      # pub-cache-path: the pub cache goes on the checkout's drive. T-0347,
+      # measured on run 35858103541: windows-latest checks this repository out
+      # to a workspace on drive D:, while this action's default put the pub
+      # cache -- where every plugin's Kotlin sources live -- at
+      # C:\Users\runneradmin\AppData\Local\Pub\Cache. The Kotlin Gradle plugin
+      # records source paths relative to app\android, and that cannot be done
+      # across two drive letters: it threw "this and base files have different
+      # roots", which surfaced as "Could not close incremental caches" in
+      # :file_selector_android and :image_picker_android.
+      #
+      # Why this input: the action's own setup.sh at v2 is what exports
+      # PUB_CACHE, to $GITHUB_ENV, for every later step, and it decides the
+      # value like this --
+      #   if [ -z "${PUB_CACHE:-}" ]; then
+      #     if [ "$PUB_CACHE_PATH" != "default" ]; then
+      #       PUB_CACHE="$PUB_CACHE_PATH"
+      #     elif [ "$OS_NAME" = "windows" ]; then
+      #       PUB_CACHE="$LOCALAPPDATA\\Pub\\Cache"
+      # -- with PUB_CACHE_PATH taken from this input (action.yml: `-d '${{
+      # inputs.pub-cache-path }}'`, declared `default: default`). The windows
+      # images declare no PUB_CACHE of their own (actions/runner-images'
+      # Windows2025 and Windows2022 readmes list none), so on entry it is unset
+      # and this input is what decides. A PUB_CACHE set beforehand -- by the
+      # image, or by a job-level `env:` here -- would win over the input, not
+      # be overwritten by the action: the first line above keeps it. A job env
+      # would therefore work too; the input is chosen because it is the
+      # action's declared interface for exactly this, and it keeps the setting
+      # beside the thing that installs the cache. That a pre-set value wins is
+      # also why the guard step below checks the result rather than trusting
+      # this line.
+      #
+      # runner.temp is expected beside the checkout on the same drive (the
+      # workspace is D:\a\<repo>\<repo> and the temp directory D:\a\_temp on
+      # the hosted Windows runners), outside the checkout, and emptied after
+      # every job. Expected, not measured from here -- the guard step checks it
+      # on every run.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.47.0"
+          channel: stable
+          pub-cache-path: ${{ runner.temp }}\pub-cache
+
+      # windows-latest needs no Android SDK installed: actions/runner-images
+      # documents the image as carrying it at C:\Android\android-sdk, with
+      # ANDROID_HOME and ANDROID_SDK_ROOT set, command-line tools 16.0,
+      # build-tools 37.0.0 and platforms android-34 through android-37 -- and
+      # this app compiles against 36 (targetSdk 36, minSdk 24).
+      #
+      # The licences on that image are accepted too, and this step is expected
+      # to be a no-op: the image's own build script,
+      # images/windows/scripts/build/Install-AndroidSDK.ps1, unpacks a
+      # `licenses` directory of accepted licence files into the SDK root --
+      # android-sdk-license among them -- so `flutter doctor
+      # --android-licenses` there prints "All SDK package licenses accepted."
+      # and changes nothing.
+      #
+      # It is kept anyway, for the case the image stops doing that or
+      # windows-latest moves to one that never did. An unaccepted licence
+      # surfaces otherwise as a Gradle failure several minutes later,
+      # complaining about a platform it will not install rather than about a
+      # licence. The step costs seconds and cannot fail the job by itself:
+      # pwsh does not throw on a native command's non-zero exit
+      # (PSNativeCommandUseErrorActionPreference is off), and the explicit
+      # `exit 0` is what GitHub reads. The build below is the gate.
+      #
+      # What it prints -- the SDK location, the doctor report and the licence
+      # command's exit code -- is what tells "already accepted" and "no SDK
+      # here at all" apart.
+      - name: Android SDK and licences
+        shell: pwsh
+        run: |
+          Write-Host "ANDROID_HOME=$env:ANDROID_HOME"
+          Write-Host "ANDROID_SDK_ROOT=$env:ANDROID_SDK_ROOT"
+          flutter doctor -v
+          ("y`n" * 30) | flutter doctor --android-licenses
+          Write-Host "flutter doctor --android-licenses exit code: $LASTEXITCODE"
+          exit 0
+
+      - name: Fetch packages
+        working-directory: app
+        run: flutter pub get
+
+      # Fail in seconds, and legibly, if the premise of pub-cache-path above
+      # ever breaks. T-0347: a pub cache on another drive than the checkout
+      # otherwise costs a 17-minute build that reports it as "Could not close
+      # incremental caches". This prints PUB_CACHE, the checkout root and where
+      # every Android plugin actually resolved to (read from the
+      # package_config.json the step above wrote, which is what the Gradle
+      # build is given), then fails naming each path whose drive differs from
+      # the checkout's.
+      #
+      # Only packages with an `android` directory are checked: those are the
+      # ones Gradle compiles Kotlin from. The Flutter SDK's own packages
+      # (flutter, flutter_test, ...) resolve into the SDK itself, which this
+      # action installs under the runner's tool cache (setup.sh:
+      # `$RUNNER_TOOL_CACHE/flutter/...`), not into the pub cache, and may
+      # legitimately sit on another drive. A check that found no Android
+      # plugin at all fails too, since it would otherwise pass having proved
+      # nothing.
+      - name: Check the pub cache is on the checkout's drive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $checkout = $env:GITHUB_WORKSPACE
+          $pubCache = $env:PUB_CACHE
+          $drive = [IO.Path]::GetPathRoot($checkout)
+          Write-Host "PUB_CACHE=$pubCache"
+          Write-Host "checkout=$checkout (drive $drive)"
+          # [IO.Path]::Combine, not Join-Path: Join-Path throws on a path
+          # whose drive does not exist on this machine.
+          $configPath = [IO.Path]::Combine($checkout, 'app', '.dart_tool', 'package_config.json')
+          $packages = (Get-Content -Raw -LiteralPath $configPath | ConvertFrom-Json).packages
+          $plugins = @(foreach ($p in $packages) {
+            if ($p.rootUri -like 'file:*') {
+              $path = ([uri]$p.rootUri).LocalPath
+              if (Test-Path -LiteralPath ([IO.Path]::Combine($path, 'android'))) {
+                [pscustomobject]@{ Name = $p.name; Path = $path }
+              }
+            }
+          })
+          Write-Host "package_config=$configPath ($($plugins.Count) Android plugins)"
+          foreach ($r in $plugins) { Write-Host "android plugin $($r.Name) -> $($r.Path)" }
+          if ($plugins.Count -eq 0) {
+            Write-Host "::error::Found no Android plugin in $configPath, so the drive check would prove nothing. Has the package resolution or its layout changed?"
+            exit 1
+          }
+          $wrong = @()
+          if (-not $pubCache) {
+            $wrong += "PUB_CACHE is not set"
+          } elseif ([IO.Path]::GetPathRoot($pubCache) -ne $drive) {
+            $wrong += "PUB_CACHE $pubCache"
+          }
+          foreach ($r in $plugins) {
+            if ([IO.Path]::GetPathRoot($r.Path) -ne $drive) { $wrong += "$($r.Name) $($r.Path)" }
+          }
+          if ($wrong) {
+            Write-Host "::error::The pub cache is not on the checkout's drive ($drive). The Kotlin Gradle plugin cannot relativise plugin sources across drives, and the build would fail 17 minutes from now with 'Could not close incremental caches'. Off-drive: $($wrong -join '; ')"
+            exit 1
+          }
+          Write-Host "OK: PUB_CACHE and all $($plugins.Count) Android plugins are on $drive"
+
+      # CI-only. T-0345, measured 2026-09-20 (runs 35515346750 and its
+      # unchanged re-run, both windows-latest): the build fails deterministically
+      # with "Could not close incremental caches" in :file_selector_android:
+      # compileReleaseKotlin and :image_picker_android:compileReleaseKotlin --
+      # two Flutter plugin modules, not this project's own source.
+      #
+      # T-0345 read that as a cold-runner file-handle/lock condition and
+      # disabled incremental compilation below. THAT DID NOT FIX IT, and the
+      # story was wrong: run 35858103541, with this variable in place, failed
+      # the same way, and its full log shows the exception the wrapper was
+      # suppressing -- "this and base files have different roots", the pub
+      # cache on C: and the checkout on D:. The real fix is pub-cache-path on
+      # the flutter-action step above (T-0347).
+      #
+      # The variable is kept only because there is no evidence either way on
+      # whether it matters: incremental compilation buys this workflow nothing
+      # (every run starts from a fresh checkout with no restored `app/build`,
+      # so there is never prior incremental state to reuse), and removing it
+      # is a separate change that would want its own run.
+      #
+      # Scoped to this one step's process via an environment variable, not
+      # `app/android/gradle.properties`, so a developer's local (warm-cache,
+      # genuinely incremental) build is completely unaffected -- the variable
+      # does not exist outside this step. `ORG_GRADLE_PROJECT_<name>` is
+      # Gradle's own documented mechanism for setting a project property (here
+      # `kotlin.incremental`, the property the Kotlin Gradle plugin reads) from
+      # an environment variable, equivalent to passing `-Pkotlin.incremental`
+      # on the command line, which `flutter build apk` has no flag to forward
+      # itself.
+      - name: Build the release APKs, split per ABI
+        working-directory: app
+        env:
+          ORG_GRADLE_PROJECT_kotlin.incremental: "false"
+        run: flutter build apk --release --split-per-abi
+
+      # What was built, in the run's own summary, so the signing is readable
+      # without downloading anything.
+      - name: Report what was built
+        shell: pwsh
+        working-directory: app
+        run: |
+          $built = Get-ChildItem build\app\outputs\flutter-apk\LocalCanvas-*.apk
+          if (-not $built) {
+            throw "the build produced no LocalCanvas-*.apk in app\build\app\outputs\flutter-apk"
+          }
+          $lines = @(
+            "### Android APK",
+            "",
+            "**Debug-signed.** This project configures no release signing, so these are",
+            "signed with the Android debug key. Sideload them; do not treat them as a",
+            "verified release, and expect no in-place update from a differently signed build.",
+            "",
+            "| File | Bytes |",
+            "|---|---|"
+          )
+          foreach ($apk in $built) {
+            Write-Host ("{0}  {1} bytes" -f $apk.Name, $apk.Length)
+            $lines += "| ``$($apk.Name)`` | $($apk.Length) |"
+          }
+          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      # Only the named copies. `--split-per-abi` also leaves
+      # `app-<abi>-release.apk` beside each of them -- byte-for-byte the same
+      # build under the filename every Flutter project on earth produces -- and
+      # uploading both would double the artefact for nothing.
+      #
+      # if-no-files-found: error, because a build that packaged nothing and an
+      # upload that matched nothing look identical on a green run otherwise.
+      #
+      # retention-days: 14 -- measured at version 0.1.5 the three APKs are
+      # 23,221,094 + 27,367,668 + 29,841,647 = 80,430,409 bytes, so about 80 MB
+      # of artefact storage per run, charged for as long as it is kept. Two
+      # weeks outlasts anyone testing the build it came from, and a fresh one is
+      # a workflow_dispatch away. The repository default (90 days) would keep
+      # every push to main for three months.
+      #
+      # compression-level: 0 -- an APK is a zip; recompressing it costs upload
+      # time and saves nothing.
+      - name: Attach the APKs to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalCanvas-apk-debug-signed
+          path: app/build/app/outputs/flutter-apk/LocalCanvas-*.apk
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

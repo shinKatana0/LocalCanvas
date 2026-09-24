@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The base endpoint is supplied by the user at runtime — typed, scanned or
+  discovered — so this app cannot know at build time which hosts it will talk
+  to, and cannot pin a domain here.
+
+  A v0.1 deployment is a gateway on the user's own LAN reached over plain HTTP,
+  which Android blocks by default from API 28 onwards. Permitting cleartext is
+  therefore a deployment fact, not an architectural one: an `https://` endpoint
+  is accepted by the app exactly as an `http://` one is, and is used over TLS
+  when that is what the user points it at (`docs/transport-boundary.md`).
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system"/>
+        </trust-anchors>
+    </base-config>
+</network-security-config>

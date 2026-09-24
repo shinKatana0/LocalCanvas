@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The two native window themes, in daylight. `values-night/styles.xml` is the
+  same file for dark mode, and `values-v31/` adds the one attribute Android 12
+  introduced.
+
+  Both themes are painted in @color/lc_canvas, the app's own ground
+  (`app/lib/theme/tokens.dart`). The stock template left them on the platform's
+  `Theme.Light` / `Theme.Black` defaults — pure #FFFFFF and pure #000000 — so
+  the very first thing a user saw on a light-mode phone was the blank white
+  screen `docs/ui-ux.md` forbids by name.
+
+  `android:colorBackground` is set as well as `android:windowBackground`
+  because it is the attribute the rest of the platform reads: the API 31+
+  system splash screen falls back to it, and anything else asking the theme
+  what colour the window is gets the canvas rather than white.
+-->
+<resources>
+    <!-- Theme applied to the Android Window while the process is starting when the OS's Dark Mode setting is off -->
+    <style name="LaunchTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <!-- Shown until the Flutter engine draws its first frame, which is the
+             first frame of `StartupIntro` — and that frame is a full-bleed
+             `LcPalette.canvas` too, so there is nothing to see at the swap. -->
+        <item name="android:windowBackground">@drawable/launch_background</item>
+        <item name="android:colorBackground">@color/lc_canvas</item>
+    </style>
+    <!-- Theme applied to the Android Window as soon as the process has started.
+         This theme determines the color of the Android Window while your
+         Flutter UI initializes, as well as behind your Flutter UI while its
+         running.
+
+         This Theme is only used starting with V2 of Flutter's Android embedding. -->
+    <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
+        <item name="android:windowBackground">@color/lc_canvas</item>
+        <item name="android:colorBackground">@color/lc_canvas</item>
+    </style>
+</resources>

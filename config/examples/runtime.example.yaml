@@ -1,0 +1,154 @@
+# LocalCanvas runtime configuration — EXAMPLE
+#
+# YOU DO NOT HAVE TO COPY THIS FILE. `pwsh .\scripts\setup.ps1` writes
+# config/local/runtime.yaml for you, asking two questions and inferring the
+# rest, and it never rewrites one that is already there. config/local/ is
+# gitignored, so your real paths never enter the repository.
+#
+# This file is the REFERENCE: every setting that exists, what it means, and
+# what happens if you leave it out. Read it when you want to change something
+# setup wrote, or when you would rather write the file yourself.
+#
+# Every path below is a placeholder. Nothing here is a working default.
+
+runtime:
+  # true  - LocalCanvas may start ComfyUI for you, and will reuse it if it is
+  #         already running. It only ever stops a ComfyUI it started itself.
+  # false - You start ComfyUI yourself. LocalCanvas never launches it and never
+  #         stops one it did not start; it only verifies that it is reachable
+  #         before starting the gateway. (If LocalCanvas started a ComfyUI for
+  #         you in an earlier managed run, it still remembers that one and can
+  #         stop it - otherwise it would be orphaned.)
+  manage_comfy: true
+
+comfy:
+  # Root of your existing ComfyUI installation. Must be an ABSOLUTE path:
+  # there is nothing a relative one could be measured from, and LocalCanvas
+  # never guesses or searches for a ComfyUI location.
+  # Forward slashes work on Windows. Paths with spaces are fine.
+  root: "C:/path/to/ComfyUI"
+
+  # Where ComfyUI listens. Keeping this on 127.0.0.1 is recommended: ComfyUI
+  # has no authentication, and only the LocalCanvas gateway needs to be
+  # reachable from your phone. See docs/privacy-security.md.
+  host: "127.0.0.1"
+  port: 8188
+
+  # How to start ComfyUI, when manage_comfy is true. You do not have to write
+  # this by hand: scripts\setup.ps1 reads both values off the installation you
+  # point it at, and writes them for you.
+  #
+  # BOTH PATHS ARE RELATIVE TO `root`, and that is the thing to get right,
+  # because ComfyUI ships in two layouts and they do not have the same answer:
+  #
+  #   portable build   root holds python_embeded\ and ComfyUI\, so
+  #                      executable: "python_embeded/python.exe"
+  #                      script:     "ComfyUI/main.py"
+  #   a plain clone    root IS the ComfyUI checkout, so
+  #                      executable: "venv/Scripts/python.exe"
+  #                      script:     "main.py"
+  #
+  # Using the first layout's `script` against the second produces a path with
+  # ComfyUI\ComfyUI\main.py in it, which is nothing. An ABSOLUTE path for either
+  # value is taken as written and is never joined to `root` -- and a bare name
+  # like "python" is NOT one: it would be read as <root>\python.
+  launcher:
+    executable: "python_embeded/python.exe"
+    script: "ComfyUI/main.py"
+
+  # Extra ComfyUI command-line arguments, one per list item. LocalCanvas passes
+  # these through and does not interpret them -- which is exactly why none is
+  # shipped here. This list used to contain "--highvram": a claim about somebody
+  # else's graphics card, handed to ComfyUI unread, and wrong on a small one. An
+  # example is a thing people copy, so it says nothing it cannot know.
+  extra_args: []
+
+workflows:
+  # Where your workflow definitions live: the folder holding your workflow YAML
+  # files and the ComfyUI API-format JSON each one points at. Relative paths are
+  # resolved from the repository root.
+  #
+  # The bundled examples are at workflows/examples. Point this at your own
+  # folder — config/local/workflows is a good place, since config/local is
+  # gitignored and your workflows stay off GitHub.
+  registry: "workflows/examples"
+
+gateway:
+  # The LocalCanvas gateway is the only LAN-facing surface. 0.0.0.0 lets your
+  # phone reach it; allow this port through Windows Firewall on Private
+  # networks only.
+  host: "0.0.0.0"
+  port: 7801
+
+startup:
+  # LocalCanvas waits for a real readiness probe, never a fixed sleep.
+  # Raise comfy_timeout_seconds if your models are slow to load.
+  comfy_timeout_seconds: 120
+  gateway_timeout_seconds: 30
+
+media:
+  # Images and videos you send from your phone. The gateway holds them in a
+  # temporary folder of its own, hands each one to ComfyUI when a generation
+  # needs it, and deletes it when it expires. This whole section is optional —
+  # the values shown are the defaults, and they are what you get if you leave
+  # it out entirely.
+  #
+  # The largest single file that may be sent. Raise max_video_megabytes if your
+  # phone shoots longer clips than this; lower these if you would rather not
+  # have large files crossing your network at all.
+  max_image_megabytes: 64
+  max_video_megabytes: 1024
+
+  # How much the temporary folder may hold in total. When a new upload would
+  # push it past this, the oldest files are deleted first.
+  max_store_megabytes: 4096
+
+  # How long an uploaded file stays before it is deleted. Long enough to pick
+  # an image, write a prompt, get interrupted and come back. A generation that
+  # refers to a file which has already gone says so, and asks for it again.
+  ttl_seconds: 3600
+
+  # NOTE, because it is yours to clean: getting a file to ComfyUI means handing
+  # it to ComfyUI's own upload endpoint, and ComfyUI keeps it. Those copies
+  # collect in a "localcanvas" subfolder of ComfyUI's input directory, and
+  # LocalCanvas cannot delete them - that is why they are all in one folder you
+  # can empty in one action. See docs/privacy-security.md.
+
+identity:
+  # Shown in the app when discovering servers, and in the mDNS advertisement.
+  display_name: "My Generation PC"
+
+prompt_translation:
+  # Write your prompt in your own language and let the PC translate it into the
+  # language the models understand, before the generation is built. It happens
+  # here, on this PC: no account, no service, nothing leaves the machine, and
+  # nothing is downloaded while you generate. This whole section is optional -
+  # leaving it out means translation is off.
+  #
+  # It needs an install of its own, because it is large (about a gigabyte):
+  #   .venv\Scripts\python.exe -m pip install --editable ".\gateway[translation]"
+  # and then one language pair per language you write in, for example:
+  #   .venv\Scripts\argospm.exe update
+  #   .venv\Scripts\argospm.exe install translate-ru_en
+  # Switching this on without installing those does not fail quietly: a prompt
+  # that needs translating says exactly what is missing and how to install it.
+  #
+  # Which language pairs you have is read once, when the gateway starts, and
+  # printed in its startup output ("Translation: ru->en"). Install a pair while
+  # it is running and it is picked up the next time you start it. The app is
+  # told the same thing, so it can say what will happen to your prompt before
+  # you press Generate.
+  enabled: false
+
+  # The language your workflows expect. Prompts are translated into it.
+  target: en
+
+  # The languages you write in. Only these two can be recognised today, and
+  # recognition is by script: a prompt with no Cyrillic and no kana is left
+  # exactly as you typed it - never rewritten, never tidied.
+  sources: [ru, ja]
+
+  # Anything inside "double quotes" is never given to the translator - a sign,
+  # a name, a piece of text you want in the picture exactly as written. Turn
+  # this off only if you would rather have quotes translated like other text.
+  preserve_quoted_literals: true

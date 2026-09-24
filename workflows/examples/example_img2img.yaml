@@ -1,0 +1,114 @@
+# Example: a workflow that starts from an image the user picks on the phone.
+#
+# The one new idea here is the `image` field type. A media field has no
+# `default` and is not a path: the app uploads a picture, and the gateway binds
+# whatever value your loader node expects. All the definition has to say is
+# which node input receives it.
+
+id: example_img2img
+name: Example Image to Image
+workflow: example_img2img_api.json
+
+presentation:
+  group: Edit
+  category: Example
+  badge: IMG2IMG
+
+  short_description: >
+    An example that reworks a picture you choose, guided by a prompt.
+
+  best_for:
+    - Learning how an image input is declared
+    - Restyling an existing picture
+
+  how_to_use: >
+    Pick a picture, then describe what should change. Strength decides how far
+    the result may travel from the original: low keeps the composition, high
+    rewrites it.
+
+  input_summary: Image and prompt
+
+  example_prompt: >
+    The same scene at golden hour, warm rim light
+
+  not_ideal_for:
+    - Generating from nothing - use the prompt-only example for that
+
+inputs:
+  - id: source_image
+    label: Source image
+    type: image
+    required: true
+    section: main
+    help: The picture to work from.
+    bind:
+      node: "15"
+      input: image
+
+  - id: prompt
+    label: Prompt
+    type: multiline
+    required: true
+    section: main
+    # Natural language, so the gateway may translate it before binding
+    # (docs/api.md). Nothing else in this file is translatable.
+    translatable: true
+    help: Describe what you want to see. More detail gives more to go on.
+    bind:
+      node: "20"
+      input: text
+
+  - id: strength
+    label: Strength
+    type: float
+    section: main
+    default: 0.55
+    min: 0.0
+    max: 1.0
+    step: 0.05
+    help: How much of the starting picture is redrawn. Lower keeps more of it.
+    bind:
+      node: "40"
+      input: denoise
+
+  - id: negative_prompt
+    label: Avoid
+    type: multiline
+    section: advanced
+    default: ""
+    bind:
+      node: "21"
+      input: text
+
+  - id: steps
+    label: Steps
+    type: integer
+    section: advanced
+    default: 20
+    min: 1
+    max: 50
+    bind:
+      node: "40"
+      input: steps
+
+  - id: seed
+    label: Seed
+    type: integer
+    section: advanced
+    default: 0
+    min: 0
+    max: 4294967295
+    role: seed
+    bind:
+      node: "40"
+      input: seed
+
+  - id: output_name
+    label: Output name
+    type: string
+    section: advanced
+    default: LocalCanvas
+    help: The prefix your saved files get.
+    bind:
+      node: "60"
+      input: filename_prefix

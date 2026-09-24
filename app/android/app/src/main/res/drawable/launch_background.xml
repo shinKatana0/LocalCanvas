@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The window the OS paints from launch until Flutter's first frame.
+
+  A flat fill of @color/lc_canvas — the app's own canvas, light or dark by
+  resource qualifier — and nothing else. Nothing else, because frame 0 of
+  `StartupIntro` is that same canvas with the mark still at opacity 0: a flat
+  fill is the pixel-exact still of the frame it hands over to, and any artwork
+  drawn here would *create* the discontinuity rather than cover one.
+
+  This describes this drawable, which is the whole of the launch window only
+  below API 31. From Android 12 the platform draws a splash screen of its own
+  instead, and it centres `android:windowSplashScreenAnimatedIcon` — defaulting
+  to @mipmap/ic_launcher — on the background colour set in `values-v31/`. So on
+  a current phone the user does see the launcher icon on the canvas before the
+  icon-less first frame. That is the platform's doing and not a contract
+  breach: the icon sits on the app's own ground rather than on white, which is
+  the whole point of this card. Whether that hand-over reads cleanly is on the
+  device-check list.
+
+  `drawable-v21/launch_background.xml` is the same file for API 21 and above,
+  which is every device this app runs on (minSdk 24); both are kept pointed at
+  the same colour so neither can be the one that is stale.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/lc_canvas" />
+</layer-list>

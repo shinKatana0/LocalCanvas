@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The one colour the native window is allowed to be: LocalCanvas's own canvas.
+
+  This is `LcPalette.light.canvas` (`app/lib/theme/tokens.dart`, #F6F7F9), and
+  `values-night/colors.xml` carries `LcPalette.dark.canvas` (#0E0F12). The two
+  files are the light and the dark half of one token, expressed the way Android
+  expresses it — a resource qualifier — so the window the OS paints before
+  Flutter's first frame is already the ground that first frame draws on.
+
+  `docs/ui-ux.md`, startup: "Never: a blank white screen, the default Flutter
+  splash", and "consistent with the app's own theme; correct in dark and light".
+  The stock template pointed at @android:color/white here, which is that blank
+  white screen by name.
+
+  Changing either value without changing the matching `LcPalette` field puts a
+  visible seam at hand-over; `app/test/launch_theme_test.dart` fails when the
+  two drift apart.
+-->
+<resources>
+    <color name="lc_canvas">#FFF6F7F9</color>
+</resources>

@@ -1,0 +1,104 @@
+# Public CI: the deterministic tests only.
+#
+# Nothing here talks to a real ComfyUI, a developer's network or a self-hosted
+# machine, and nothing uses a secret. Tests that need any of those are the
+# integration class: they skip themselves, with the reason printed, unless
+# LOCALCANVAS_INTEGRATION=1 is set -- and it is not set here.
+#
+# windows-latest is the platform every suite is measured on.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gateway:
+    name: gateway (Python ${{ matrix.python }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor and the ceiling of requires-python in gateway/pyproject.toml.
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Create the gateway environment
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install --disable-pip-version-check -e "gateway[test]"
+      - name: Deterministic gateway tests
+        shell: pwsh
+        working-directory: gateway
+        run: ..\.venv\Scripts\python.exe -m pytest
+
+  app:
+    name: app (Flutter 3.47.0)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          # app/.metadata records stable revision 4cf24164269a5ebf0c16a028a00727d0e77bbb05,
+          # which is Flutter 3.47.0 (Dart 3.13.0); app/pubspec.lock needs >=3.44.0.
+          flutter-version: "3.47.0"
+          channel: stable
+      - name: Fetch packages
+        working-directory: app
+        run: flutter pub get
+      - name: Analyze
+        working-directory: app
+        run: flutter analyze
+      - name: Test
+        working-directory: app
+        run: flutter test
+
+  scripts:
+    name: scripts (${{ matrix.group }})
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # CI_GROUPS in scripts/tests/run_tests.py; CiGroupingTests holds this
+        # list and that one equal.
+        group:
+          - runtime-launch
+          - runtime-stop
+          - runtime-ownership
+          - strict-lan-plan
+          - strict-lan-command
+          - doctor
+          - doctor-probes
+          - doctor-shells
+          - sync-and-comfy-install
+          - comfy-bootstrap
+          - comfy-doctor
+          - comfy-doctor-transport
+          - comfy-models
+    steps:
+      - uses: actions/checkout@v4
+      # A plain interpreter with no gateway installed: the suite refuses one
+      # that has it (run_tests.py, refuse_an_interpreter_carrying_the_gateway).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Script tests (${{ matrix.group }})
+        shell: pwsh
+        run: python scripts\tests\run_tests.py --ci-group ${{ matrix.group }}

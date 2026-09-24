@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "localcanvas-gateway"
+description = "LocalCanvas gateway: HTTP API, workflow registry and ComfyUI client"
+readme = "README.md"
+license = { text = "MIT" }
+# The supported range is conservative and includes 3.10 (docs/runtime.md).
+# Nothing in the dependency list below requires more: FastAPI, uvicorn, httpx,
+# zeroconf, segno and PyYAML all support 3.10. The gateway's own .venv is built
+# on the floor of that range, so the floor is a tested guarantee rather than a
+# claim.
+#
+# The ceiling is honesty, not policy: nothing here has been run on 3.14, and on
+# Windows `py` picks the newest interpreter installed, so an untested one is
+# exactly what a machine with several Pythons would reach for first. Raise it
+# after the suite has actually passed there -- it is a range, not a pin, so
+# 3.11, 3.12 and 3.13 are all in scope.
+requires-python = ">=3.10,<3.14"
+dynamic = ["version"]
+dependencies = [
+    # The HTTP surface in docs/api.md, and the server that runs it.
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    # POST /api/v1/media is multipart/form-data (docs/api.md). Starlette parses
+    # a form only when this is installed, so it is a hard requirement of that
+    # endpoint rather than an optional extra.
+    "python-multipart>=0.0.7",
+    # Configuration and workflow definitions are YAML (docs/runtime.md).
+    "PyYAML>=6.0",
+    # The ComfyUI client. Also what FastAPI's own TestClient uses, so the tests
+    # need no separate HTTP library.
+    "httpx>=0.27",
+    # WS /api/v1/jobs/{id}/events (docs/api.md), on both sides of the gateway.
+    # uvicorn serves a WebSocket only when a websocket implementation is
+    # installed -- without one it answers the handshake with an error and
+    # `capabilities.events` would be a lie -- and this is also the client the
+    # gateway uses to read progress off ComfyUI's own socket, which is the only
+    # place ComfyUI reports it. Both are core behaviour, so it is a dependency
+    # and not an extra.
+    "websockets>=12",
+    # mDNS advertisement of _localcanvas._tcp (docs/connection.md).
+    "zeroconf>=0.131",
+    # QR pairing rendered locally: segno is pure Python with no dependencies of
+    # its own, and needs no image library to draw into a terminal
+    # (docs/connection.md forbids any external or hosted QR service).
+    "segno>=1.5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+# Local prompt translation (docs/api.md). An extra, never a base dependency:
+# argostranslate imports stanza at module load and stanza requires torch, so
+# installing it costs about 981 MB across 70 packages -- measured, including on
+# 1.9.6 and 1.8.3, and `--no-deps` fails at import with no stanza. That tree
+# also carries pydantic, httpx, anyio and PyYAML, which the gateway already
+# pins, so making it a base dependency would put the whole suite at version
+# risk for a feature most users do not want. An unrelated ComfyUI user must be
+# able to run LocalCanvas without downloading a gigabyte.
+#
+# The floor is the version the feature was measured against; it is also the
+# first one whose settings report which model provider is in use, which is what
+# lets the gateway refuse a remote one (translation/backends.py).
+translation = ["argostranslate>=1.11,<2"]
+
+[tool.setuptools.dynamic]
+version = { attr = "localcanvas_gateway.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["localcanvas_gateway*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Two classes of test (tests/conftest.py). The ordinary run is deterministic;
+# a test marked `integration` runs only with LOCALCANVAS_INTEGRATION=1 and is
+# otherwise skipped, and `-rs` prints why every skipped test was skipped.
+markers = [
+    "integration: needs a real ComfyUI, a real browser or machine state outside the test's control; runs only with LOCALCANVAS_INTEGRATION=1",
+]
+addopts = "-rs"

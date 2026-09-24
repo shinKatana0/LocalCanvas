@@ -1,0 +1,62 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Talking to the gateway. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Searching the network for a gateway. Android's Wi-Fi stack drops
+         multicast frames not addressed to this device unless a
+         `WifiManager.MulticastLock` is held, and before Android 13
+         T-extension 7 an app has to take that lock itself (the `NsdManager`
+         reference, "Wi-Fi Multicast Lock"); `minSdkVersion` here is 24.
+         The `nsd_android` plugin takes the lock on our behalf, and refuses to
+         start a discovery at all unless this is declared. Protection level
+         normal: granted at install, shown in no dialogue, asked of nobody. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"/>
+    <!-- Reading a pairing code. Declared optional so a device without a
+         camera can still install and use manual entry and discovery. -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
+    <application
+        android:label="LocalCanvas"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:networkSecurityConfig="@xml/network_security_config">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <!-- Specifies an Android theme to apply to this Activity as soon as
+                 the Android process has started. This theme is visible to the user
+                 while the Flutter UI initializes. After that, this theme continues
+                 to determine the Window background behind the Flutter UI. -->
+            <meta-data
+              android:name="io.flutter.embedding.android.NormalTheme"
+              android:resource="@style/NormalTheme"
+              />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <!-- Don't delete the meta-data below.
+             This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+    <!-- Required to query activities that can process text, see:
+         https://developer.android.com/training/package-visibility and
+         https://developer.android.com/reference/android/content/Intent#ACTION_PROCESS_TEXT.
+
+         In particular, this is used by the Flutter engine in io.flutter.plugin.text.ProcessTextPlugin. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.PROCESS_TEXT"/>
+            <data android:mimeType="text/plain"/>
+        </intent>
+    </queries>
+</manifest>
