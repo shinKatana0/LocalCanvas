@@ -30,6 +30,8 @@ internal sealed partial class StubbedLocalCanvas : IAsyncDisposable
         CopyTree(Path.Combine(TestEnvironment.Repository, "workflows", "examples"), Path.Combine(Root, "workflows", "examples"), skip: null);
         StubEnv = Path.Combine(Scratch, "stubenv");
         CopyTree(Path.Combine(TestEnvironment.Repository, "scripts", "tests", "stubenv"), StubEnv, skip: null);
+        SlowConfigFlag = Path.Combine(Scratch, "slow config.flag");
+        SlowTheCopiedConfigSeam();
         StubComfy = Path.Combine(Scratch, "stub_comfy.py");
         File.Copy(Path.Combine(TestEnvironment.Repository, "scripts", "tests", "stub_comfy.py"), StubComfy);
 
@@ -52,6 +54,8 @@ internal sealed partial class StubbedLocalCanvas : IAsyncDisposable
             ["LOCALCANVAS_RUNTIME_DIR"] = null,
             ["LC_STUB_GATEWAY_MARKER"] = GatewayMarker,
             ["LC_STUB_SYNC_MODE"] = "attention",
+            ["LC_TEST_SLOW_CONFIG_FLAG"] = SlowConfigFlag,
+            ["LC_TEST_SLOW_CONFIG_SECONDS"] = "3",
         };
         Log = new LauncherLog(Path.Combine(Root, ".runtime", "launcher.log"));
     }
@@ -62,6 +66,9 @@ internal sealed partial class StubbedLocalCanvas : IAsyncDisposable
     public string Root { get; }
     public string StubEnv { get; }
     public string StubComfy { get; }
+
+    /// <summary>While this file exists, the next configuration read (and only that one) takes 3 s longer.</summary>
+    public string SlowConfigFlag { get; }
     public string ComfyRoot { get; }
     public int ComfyPort { get; }
     public int GatewayPort { get; }
@@ -74,17 +81,38 @@ internal sealed partial class StubbedLocalCanvas : IAsyncDisposable
 
     public string RuntimeDirectory => Path.Combine(Root, ".runtime");
 
-    public LifecycleController NewController(TimeSpan? interval = null)
+    public LifecycleController NewController(TimeSpan? interval = null, IScriptRunner? runner = null, Func<ScriptCall, ScriptCall>? callPolicy = null)
     {
         var processes = new HiddenProcessRunner();
         return new LifecycleController(
-            new PwshScriptRunner(Pwsh, Root, processes, Log, Environment),
+            runner ?? Runner(),
             Health,
             Prompts,
             new FakeSetup(() => throw new InvalidOperationException("setup must not be needed here")),
             new SeamSettingsReader(Pwsh, Root, processes, Log, Environment),
             Log,
-            new LifecycleOptions { Root = Root, HealthInterval = interval ?? TimeSpan.FromSeconds(5) });
+            new LifecycleOptions { Root = Root, HealthInterval = interval ?? TimeSpan.FromSeconds(5), CallPolicy = callPolicy ?? (static call => call) });
+    }
+
+    public PwshScriptRunner Runner() => new(Pwsh, Root, new HiddenProcessRunner(), Log, Environment);
+
+    /// <summary>
+    /// A start that is slow before it launches anything: the COPY of the stub
+    /// gateway in this test's scratch folder reads the configuration 3 s late,
+    /// once, when the flag file exists. The repository's stub is untouched.
+    /// </summary>
+    private void SlowTheCopiedConfigSeam()
+    {
+        var stub = Path.Combine(StubEnv, "localcanvas_gateway", "__main__.py");
+        Assert.StartsWith(Scratch, stub, StringComparison.OrdinalIgnoreCase);
+        var text = File.ReadAllText(stub);
+        const string anchor = "def _config_command(argv):\n";
+        Assert.Single(Regex.Matches(text, Regex.Escape(anchor)));
+        File.WriteAllText(stub, text.Replace(anchor, anchor +
+            "    _flag = os.environ.get(\"LC_TEST_SLOW_CONFIG_FLAG\")\n" +
+            "    if _flag and os.path.exists(_flag):\n" +
+            "        os.remove(_flag)\n" +
+            "        time.sleep(float(os.environ.get(\"LC_TEST_SLOW_CONFIG_SECONDS\") or \"5\"))\n", StringComparison.Ordinal));
     }
 
     /// <summary>A ComfyUI stand-in of this test's own, not started by LocalCanvas.</summary>
@@ -430,5 +458,143 @@ public sealed class EndToEndTests
             await Task.Delay(100);
         }
         Assert.Fail($"PID {pid} is still running");
+    }
+}
+
+/// <summary>
+/// Wraps the real runner: makes the next Gateway start slow, and records when
+/// each call began and when a call the launcher stopped waiting for ended.
+/// </summary>
+internal sealed class RecordingRunner(IScriptRunner inner, string slowFlag) : IScriptRunner
+{
+    public readonly System.Collections.Concurrent.ConcurrentQueue<(string What, DateTime At)> Timeline = new();
+
+    public Task? GatewayStartStillRunning { get; private set; }
+
+    public int? GatewayStartPid { get; private set; }
+
+    public async Task<ScriptOutcome> RunAsync(ScriptCall call, CancellationToken cancellationToken = default)
+    {
+        if (call.Names("start.ps1", "-Component", "Gateway"))
+        {
+            File.WriteAllText(slowFlag, "slow");
+        }
+        Timeline.Enqueue(("start " + call.Describe(), DateTime.UtcNow));
+        var outcome = await inner.RunAsync(call, cancellationToken);
+        if (outcome.StillRunning is { } running)
+        {
+            var recorded = running.ContinueWith(_ => Timeline.Enqueue(("ended " + call.Describe(), DateTime.UtcNow)), TaskScheduler.Default);
+            outcome = outcome with { StillRunning = recorded };
+            if (call.Names("start.ps1", "-Component", "Gateway"))
+            {
+                GatewayStartStillRunning = recorded;
+                GatewayStartPid = outcome.ProcessId;
+            }
+        }
+        else
+        {
+            Timeline.Enqueue(("ended " + call.Describe(), DateTime.UtcNow));
+        }
+        return outcome;
+    }
+
+    public DateTime When(string what) => Timeline.First(entry => entry.What == what).At;
+}
+
+/// <summary>Stopping never runs beside a start that is still in flight -- on the real scripts.</summary>
+[Collection(RealProcesses.Name)]
+public sealed class InFlightEndToEndTests
+{
+    private static void SkipUnlessRunnable()
+    {
+        Assert.SkipWhen(TestEnvironment.Pwsh is null, "PowerShell 7 is not installed, so the end-to-end run was NOT made.");
+        Assert.SkipWhen(TestEnvironment.Python is null,
+            "No Python 3.10-3.13 was found (LOCALCANVAS_TEST_PYTHON or py -3.1x), so the stub runtime could not run and the end-to-end run was NOT made.");
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, int seconds, string what, StubbedLocalCanvas site)
+    {
+        var until = DateTime.UtcNow.AddSeconds(seconds);
+        while (DateTime.UtcNow < until)
+        {
+            if (condition())
+            {
+                return;
+            }
+            await Task.Delay(50);
+        }
+        Assert.Fail($"Timed out after {seconds} s waiting for {what}.\n{File.ReadAllText(site.Log.Location)}");
+    }
+
+    /// <summary>Nothing the stub Gateway ever launched here is still alive.</summary>
+    private static async Task AssertNoGatewayLeftAsync(StubbedLocalCanvas site)
+    {
+        var launched = File.Exists(site.GatewayMarker)
+            ? File.ReadAllLines(site.GatewayMarker).Select(line => Regex.Match(line, @"pid=(\d+)")).Where(m => m.Success)
+                .Select(m => int.Parse(m.Groups[1].Value, CultureInfo.InvariantCulture)).ToArray()
+            : [];
+        Assert.NotEmpty(launched);
+        for (var i = 0; i < 100 && launched.Any(StubbedLocalCanvas.Alive); i++)
+        {
+            await Task.Delay(100);
+        }
+        Assert.DoesNotContain(launched, StubbedLocalCanvas.Alive);
+        Assert.Null(site.Record("gateway"));
+    }
+
+    [Fact]
+    public async Task Session_end_during_a_slow_Gateway_start_waits_for_it_then_stops_and_confirms()
+    {
+        SkipUnlessRunnable();
+        await using var site = new StubbedLocalCanvas(manageComfy: true);
+        site.Prompts.SyncAnswer = false;
+        var runner = new RecordingRunner(site.Runner(), site.SlowConfigFlag);
+        var controller = site.NewController(runner: runner);
+        await using var _ = controller;
+        controller.Start();
+        await WaitUntilAsync(() => runner.Timeline.Any(entry => entry.What == "start start.ps1 -Component Gateway -Json"), 180, "the Gateway start", site);
+        await Task.Delay(1500);
+
+        var finished = await Task.Run(() => controller.EndSession(TimeSpan.FromSeconds(25)));
+
+        // Whatever the budget allowed, the start that was in flight ends by itself.
+        Assert.NotNull(runner.GatewayStartStillRunning);
+        await runner.GatewayStartStillRunning!.WaitAsync(TimeSpan.FromSeconds(90));
+        var log = File.ReadAllText(site.Log.Location);
+        Assert.True(finished, log);
+        Assert.True(runner.When("start stop.ps1 -Json") >= runner.When("ended start.ps1 -Component Gateway -Json"),
+            "stop.ps1 ran while the Gateway start was still in flight");
+        Assert.Contains("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)", log, StringComparison.Ordinal);
+        await AssertNoGatewayLeftAsync(site);
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            $"start ended {(runner.When("ended start.ps1 -Component Gateway -Json") - runner.When("start start.ps1 -Component Gateway -Json")).TotalSeconds:0.0} s after it began");
+    }
+
+    [Fact]
+    public async Task A_Gateway_start_past_the_launchers_timeout_is_waited_out_then_stopped_and_confirmed()
+    {
+        SkipUnlessRunnable();
+        await using var site = new StubbedLocalCanvas(manageComfy: true);
+        site.Prompts.SyncAnswer = false;
+        var runner = new RecordingRunner(site.Runner(), site.SlowConfigFlag);
+        // The launcher's own timeout on the Gateway start, shortened to 3 s so
+        // that it passes while the (3 s slower) start is still running.
+        var controller = site.NewController(runner: runner, callPolicy: call => call.Names("start.ps1", "-Component", "Gateway")
+            ? call with { Timeout = TimeSpan.FromSeconds(3), Grace = TimeSpan.FromSeconds(60) }
+            : call);
+        await using var _ = controller;
+        controller.Start();
+
+        var done = await Task.WhenAny(controller.Completion, Task.Delay(TimeSpan.FromSeconds(240)));
+        var log = File.ReadAllText(site.Log.Location);
+        Assert.True(done == controller.Completion, log);
+
+        var failure = Assert.Single(site.Prompts.Failures);
+        Assert.Contains("did not finish within 3 seconds. It has ended since.", failure.What, StringComparison.Ordinal);
+        Assert.True(runner.When("start stop.ps1 -Json") >= runner.When("ended start.ps1 -Component Gateway -Json"),
+            "stop.ps1 ran while the Gateway start was still in flight");
+        Assert.Contains("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)", log, StringComparison.Ordinal);
+        await AssertNoGatewayLeftAsync(site);
+        Assert.Null(site.Record("comfy"));
     }
 }
