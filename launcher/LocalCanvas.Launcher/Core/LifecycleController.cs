@@ -257,6 +257,9 @@ public sealed class LifecycleController : IAsyncDisposable
         try
         {
             await _lifetime.CancelAsync().ConfigureAwait(false);
+            // A controller going away waits for nothing: a question or a
+            // script call still awaited is abandoned (never ended).
+            await _sessionEnd.CancelAsync().ConfigureAwait(false);
         }
         catch (ObjectDisposedException)
         {
