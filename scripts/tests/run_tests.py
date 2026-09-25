@@ -4334,11 +4334,6 @@ class UnidentifiedGatewayTests(ScriptTestCase):
     """
 
     STATUS_UNIDENTIFIED = "answering, but it does not identify as a LocalCanvas gateway"
-    START_DETAIL = '       The app will report it as "Not a LocalCanvas server".'
-
-    def start_warning(self):
-        return ("[WARN] Something is answering {} but it does not identify as a "
-                "LocalCanvas gateway.".format(self.gateway_health_url))
 
     def gateway_field(self, output):
         """status.ps1's `Gateway:` field: the address and what was found there."""
@@ -4388,31 +4383,41 @@ class UnidentifiedGatewayTests(ScriptTestCase):
                 self.assertEqual([gateway, said], self.gateway_field(output), output)
                 self.assert_no_stack_trace(output)
 
-    def test_start_warns_that_an_unidentified_answer_does_not_identify(self):
+    def test_start_refuses_an_answer_that_does_not_identify(self):
+        """The stricter contract: such an answer is not readiness at all.
+
+        This used to be a warning printed above "Gateway ready" -- the start
+        went ahead and exited 0. Readiness is now identity-verified
+        (docs/runtime.md, "Machine interface"): an answer is ready only when
+        it identifies as LocalCanvas AND echoes the instance id this start
+        gave the gateway, so each of these shapes is a gateway that did not
+        become ready -- exit 5, the child stopped and its record removed. The
+        real identity is the control.
+        """
         shapes = (
-            ("", "a LocalCanvas gateway's own answer", False),
-            ("1", "another service's JSON object", True),
-            ("html", "a 2xx web page", True),
-            ("empty-object", "{}", True),
+            ("", "a LocalCanvas gateway's own answer", True),
+            ("1", "another service's JSON object", False),
+            ("html", "a 2xx web page", False),
+            ("empty-object", "{}", False),
         )
-        for alien, body, warns in shapes:
+        for alien, body, ready in shapes:
             with self.subTest(body=body):
-                self.write_config()
+                self.write_config(gateway_timeout=3)
                 result = self.run_script(
                     "start.ps1", env=self.script_env(LC_STUB_GATEWAY_ALIEN=alien))
                 output = self.output_of(result)
                 self.assertEqual(0, self.run_script("stop.ps1", timeout=90).returncode)
-                self.assertEqual(0, result.returncode, output)
                 lines = output.splitlines()
-                self.assertIn("[ OK ] Gateway ready", lines, output)
-                if warns:
-                    self.assertIn(self.start_warning(), lines, output)
-                    index = lines.index(self.start_warning())
-                    self.assertEqual(
-                        [self.start_warning(), self.START_DETAIL, "[ OK ] Gateway ready"],
-                        lines[index:index + 3], output)
-                else:
+                if ready:
+                    self.assertEqual(0, result.returncode, output)
+                    self.assertIn("[ OK ] Gateway ready", lines, output)
                     self.assertNotIn("does not identify", output)
+                else:
+                    self.assertEqual(5, result.returncode, output)
+                    self.assertNotIn("[ OK ] Gateway ready", lines, output)
+                    self.assertIn("gateway did not become ready within 3s", output)
+                    self.assertIn("it answered, but not as a LocalCanvas gateway", output)
+                    self.assertIsNone(self.read_pid_file("gateway"))
                 self.assert_no_stack_trace(output)
 
 
@@ -24679,6 +24684,796 @@ class ComfyModelLintTests(ComfyBootstrapTestCase):
 # require_integration(), with the reason printed, and a run opts back into it
 # with LOCALCANVAS_INTEGRATION=1.
 
+# ==========================================================================
+# The machine interface: -Component, -Json, instance identity, the port check
+# ==========================================================================
+#
+# docs/runtime.md, "Machine interface". A launcher runs these scripts with no
+# window and standard input the null device, and acts on their exit codes and
+# on the one JSON document each prints. It owns no process logic of its own,
+# so everything it relies on is asserted here, through the real scripts and
+# the suite's stub gateway and stub ComfyUI, on ephemeral loopback ports.
+
+INSTANCE_ID = re.compile(r"^[0-9a-f]{32}$")
+#: Another gateway's instance id, as a harness gateway or a steered stub gives it.
+OTHER_INSTANCE_ID = "0123456789abcdef0123456789abcdef"
+
+
+class MachineInterfaceTestCase(ScriptTestCase):
+    """Shared helpers: one JSON document, a record, listeners the harness owns."""
+
+    def json_document(self, result):
+        """The one document on standard output, or a failure saying what else was there.
+
+        Exactly one line, no byte-order mark, and it parses on its own: a blank
+        line or a human line anywhere on standard output fails here, which a
+        bare json.loads -- that skips whitespace -- would not notice.
+        """
+        output = self.output_of(result)
+        stdout = result.stdout or ""
+        self.assertFalse(stdout.startswith("﻿"), "a byte-order mark on stdout:\n" + output)
+        lines = stdout.splitlines()
+        self.assertEqual(1, len(lines), "stdout is not exactly one line:\n" + repr(stdout)
+                         + "\n--- stderr ---\n" + (result.stderr or ""))
+        self.assertTrue(lines[0].isascii(), "stdout is not ASCII: " + repr(lines[0][:200]))
+        document = json.loads(lines[0])
+        self.assertIsInstance(document, dict, output)
+        for key in ("result_version", "ok", "exit_code", "error"):
+            self.assertIn(key, document, output)
+        self.assertEqual(1, document["result_version"], output)
+        self.assertEqual(result.returncode, document["exit_code"], output)
+        if document["error"] is not None:
+            self.assertEqual({"what", "detail", "fix"}, set(document["error"]), output)
+            self.assertTrue(document["error"]["what"], output)
+        return document
+
+    def run_json(self, name, *extra_args, **kwargs):
+        result = self.run_script(name, *extra_args, "-Json", **kwargs)
+        return result, self.json_document(result)
+
+    def pid_file_bytes(self, role):
+        path = self.runtime_dir / "{}.pid".format(role)
+        return path.read_bytes() if path.exists() else None
+
+    def launched_gateway_pids(self):
+        """PIDs of the gateways start.ps1 launched, from the stub's own tripwire."""
+        if not self.gateway_marker.exists():
+            return []
+        return [int(found) for found in re.findall(
+            r"pid=(\d+)", self.gateway_marker.read_text(encoding="utf-8", errors="replace"))]
+
+    def info(self):
+        with urllib.request.urlopen(self.gateway_health_url, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def start_harness_gateway(self, instance_id=None, **stub_env):
+        """A LocalCanvas gateway the HARNESS owns, on the configured port.
+
+        Its own tripwire file, so it is never counted as a gateway start.ps1
+        launched. It is ended by the teardown, by its PID.
+        """
+        env = self.script_env(**stub_env)
+        env["LC_STUB_GATEWAY_MARKER"] = str(self.workspace / "harness gateway.marker")
+        command = [sys.executable, "-m", "localcanvas_gateway", "--config", str(self.config_path),
+                   "--host", "127.0.0.1", "--port", str(self.gateway_port), "--no-qr", "--no-mdns"]
+        if instance_id:
+            command += ["--instance-id", instance_id]
+        process = subprocess.Popen(command, env=env, cwd=str(REPO),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.owned_stubs.append(process)
+        self.assertTrue(wait_until(lambda: http_ok(self.gateway_health_url), 30),
+                        "the harness's own gateway stub never answered")
+        return process
+
+    def start_foreign_listener(self, answer):
+        """A listener the harness owns on the gateway port, in this process.
+
+        ``http`` answers every request with HTTP 404 -- an HTTP service that is
+        not a gateway. ``silent`` accepts connections and never answers.
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", self.gateway_port))
+        listener.listen(16)
+        listener.settimeout(0.25)
+        stop = threading.Event()
+        held = []
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                if answer == "silent":
+                    held.append(connection)
+                    continue
+                try:
+                    connection.settimeout(5)
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        request += chunk
+                    connection.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n"
+                                       b"Connection: close\r\n\r\nnot found")
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+
+        def shut_down():
+            stop.set()
+            thread.join(timeout=5)
+            for connection in held:
+                connection.close()
+            listener.close()
+
+        self.addCleanup(shut_down)
+        return thread
+
+
+class ComponentTests(MachineInterfaceTestCase):
+    """start.ps1 and stop.ps1 -Component: each part alone, and nothing else."""
+
+    def test_comfy_component_starts_comfy_and_nothing_else(self):
+        self.write_config()
+        result, document = self.run_json("start.ps1", "-Component", "Comfy")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertTrue(self.comfy_marker.exists(), "ComfyUI was not started")
+        self.assertIsNotNone(self.read_pid_file("comfy"))
+        # No gateway, in any sense: not launched, not recorded, not answering.
+        self.assertFalse(self.gateway_marker.exists(), "-Component Comfy launched a gateway")
+        self.assertIsNone(self.read_pid_file("gateway"))
+        self.assertFalse(http_ok(self.gateway_health_url))
+        # And no workflow check.
+        self.assertNotIn("Workflows:", output)
+        self.assertEqual("Comfy", document["component"])
+        self.assertEqual({"status": "ready", "url": "http://127.0.0.1:{}".format(self.comfy_port),
+                          "ownership": "owned", "pid": self.read_pid_file("comfy")["pid"]},
+                         document["comfy"])
+        self.assertEqual("skipped", document["gateway"]["status"])
+        self.assertIsNone(document["workflows"])
+
+    def test_gateway_component_never_probes_requires_or_touches_comfyui(self):
+        """Managed mode, no ComfyUI anywhere, and a ComfyUI record nobody can read.
+
+        -Component All would launch ComfyUI here and remove that record; the
+        gateway alone must do neither, and must not need ComfyUI to start.
+        """
+        self.write_config()
+        self.write_pid_file("comfy", {"pid": "not a pid"})
+        before = self.pid_file_bytes("comfy")
+
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertFalse(self.comfy_marker.exists(), "-Component Gateway launched ComfyUI")
+        self.assertEqual(before, self.pid_file_bytes("comfy"),
+                         "-Component Gateway touched the ComfyUI ownership record")
+        self.assertNotIn("Workflows:", output)
+        self.assertNotIn("ComfyUI ready", output)
+        self.assertIn("[ OK ] Gateway ready", output)
+        self.assertEqual("skipped", document["comfy"]["status"])
+        self.assertEqual("ready", document["gateway"]["status"])
+        self.assertIsNone(document["workflows"])
+
+    def test_gateway_component_starts_without_an_external_comfyui(self):
+        # All would stop at exit 4 here; the gateway does not require ComfyUI.
+        self.write_config(manage_comfy=False)
+        result = self.run_script("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertNotIn("ComfyUI is not reachable", output)
+        self.assertIn("[ OK ] LocalCanvas Gateway is ready", output)
+        # The control: All, on the same configuration, needs ComfyUI.
+        self.assertEqual(0, self.run_script("stop.ps1", timeout=90).returncode)
+        self.assertEqual(4, self.run_script("start.ps1").returncode)
+
+    def test_workflow_switches_are_refused_with_comfy_or_gateway(self):
+        self.write_config()
+        for component in ("Comfy", "Gateway"):
+            for switch in ("-SyncWorkflows", "-SkipWorkflowCheck"):
+                with self.subTest(component=component, switch=switch):
+                    result, document = self.run_json("start.ps1", "-Component", component, switch)
+                    output = self.output_of(result)
+                    self.assertEqual(2, result.returncode, output)
+                    self.assertIn("{} and -Component {} contradict each other".format(
+                        switch, component), document["error"]["what"])
+                    self.assert_no_stack_trace(output)
+        self.assertFalse(self.comfy_marker.exists())
+        self.assertFalse(self.gateway_marker.exists())
+        # All keeps accepting each of them.
+        self.assertEqual(0, self.run_script("start.ps1", "-SkipWorkflowCheck").returncode)
+
+    def test_stop_gateway_component_leaves_comfyui_and_its_record_alone(self):
+        self.write_config()
+        self.assertEqual(0, self.run_script("start.ps1").returncode)
+        comfy = self.read_pid_file("comfy")
+        comfy_bytes = self.pid_file_bytes("comfy")
+        gateway = self.read_pid_file("gateway")
+        self.assertIsNotNone(comfy)
+        self.assertIsNotNone(gateway)
+
+        result, document = self.run_json("stop.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertTrue(wait_until(lambda: not self.alive(gateway["pid"]), 20))
+        self.assertIsNone(self.read_pid_file("gateway"))
+        # ComfyUI: still running, still answering, its record byte for byte.
+        self.assertTrue(self.alive(comfy["pid"]), "stop -Component Gateway stopped ComfyUI")
+        self.assertTrue(http_ok(self.comfy_health_url))
+        self.assertEqual(comfy_bytes, self.pid_file_bytes("comfy"))
+        self.assertNotIn("ComfyUI", result.stderr)
+        self.assertEqual("Gateway", document["component"])
+        self.assertEqual({"state_before": "running", "action": "stop",
+                          "result": document["roles"]["gateway"]["result"], "pid": gateway["pid"]},
+                         document["roles"]["gateway"])
+        self.assertIn(document["roles"]["gateway"]["result"], ("exited", "terminated"))
+        self.assertEqual({"state_before": None, "action": "skipped", "result": None, "pid": None},
+                         document["roles"]["comfy"])
+
+    def test_stop_gateway_component_does_not_read_a_broken_comfyui_record(self):
+        # All removes an unreadable record; the gateway alone does not look.
+        self.write_config()
+        self.write_pid_file("comfy", {"pid": "not a pid"})
+        before = self.pid_file_bytes("comfy")
+        result = self.run_script("stop.ps1", "-Component", "Gateway")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertEqual(before, self.pid_file_bytes("comfy"))
+        # The control: All does read it, and removes it.
+        result = self.run_script("stop.ps1")
+        self.assertIn("unusable PID file removed", self.output_of(result))
+        self.assertIsNone(self.pid_file_bytes("comfy"))
+
+    def test_restart_gateway_is_stop_then_start_and_comfyui_stays(self):
+        """The launcher's Restart Gateway, end to end."""
+        self.write_config()
+        _, first = self.run_json("start.ps1", "-Component", "All")
+        self.assertTrue(first["ok"], first)
+        comfy_pid = first["comfy"]["pid"]
+
+        _, stopped = self.run_json("stop.ps1", "-Component", "Gateway")
+        self.assertEqual("stop", stopped["roles"]["gateway"]["action"])
+        _, second = self.run_json("start.ps1", "-Component", "Gateway")
+        self.assertEqual("ready", second["gateway"]["status"])
+        self.assertNotEqual(first["gateway"]["instance_id"], second["gateway"]["instance_id"])
+        self.assertNotEqual(first["gateway"]["pid"], second["gateway"]["pid"])
+        self.assertEqual(second["gateway"]["instance_id"], self.info()["instance_id"])
+        self.assertTrue(self.alive(comfy_pid))
+        self.assertEqual(comfy_pid, self.read_pid_file("comfy")["pid"])
+
+
+class GatewayIdentityTests(MachineInterfaceTestCase):
+    """The instance id: generated, passed, recorded -- and required."""
+
+    def test_the_instance_id_is_generated_passed_and_recorded(self):
+        self.write_config(gateway_host="127.0.0.1")
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        gateway = document["gateway"]
+        self.assertRegex(gateway["instance_id"], INSTANCE_ID)
+        # Passed: the gateway itself echoes it.
+        self.assertEqual(gateway["instance_id"], self.info()["instance_id"])
+        # Recorded, beside the identity evidence, with the published endpoint.
+        record = self.read_pid_file("gateway")
+        self.assertEqual(gateway["instance_id"], record["instance_id"])
+        self.assertEqual(gateway["pid"], record["pid"])
+        self.assertEqual("http://127.0.0.1:{}".format(self.gateway_port), record["published_endpoint"])
+        self.assertIs(False, record["is_lan"])
+        self.assertEqual("loopback-bind", record["local_only_reason"])
+        for key in ("published_endpoint", "is_lan", "local_only_reason"):
+            self.assertEqual(record[key], gateway[key], key)
+        self.assertEqual("http://127.0.0.1:{}/api/v1/info".format(self.gateway_port), gateway["probe_url"])
+        for key in ("pid", "start_time_utc_ticks", "image_path", "owned_by"):
+            self.assertIn(key, record)
+
+    def test_every_launch_gets_a_fresh_id(self):
+        self.write_config()
+        ids = []
+        for _ in range(2):
+            _, document = self.run_json("start.ps1", "-Component", "Gateway")
+            ids.append(document["gateway"]["instance_id"])
+            self.assertEqual(0, self.run_script("stop.ps1", "-Component", "Gateway").returncode)
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_a_localcanvas_answer_with_another_instance_id_is_not_ready(self):
+        """Our own child alive and answering -- as another instance. Not ready."""
+        self.write_config(gateway_timeout=3)
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway",
+            env=self.script_env(LC_STUB_GATEWAY_INSTANCE_ID=OTHER_INSTANCE_ID))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("gateway did not become ready within 3s", output)
+        self.assertIn("answered with instance {}".format(OTHER_INSTANCE_ID), output)
+        self.assertNotIn("[ OK ] Gateway ready", output)
+        self.assertIsNone(self.read_pid_file("gateway"))
+        # The child it started was stopped, by its PID.
+        for pid in self.launched_gateway_pids():
+            self.assertTrue(wait_until(lambda: not self.alive(pid), 20), pid)
+        self.assertEqual("failed", document["gateway"]["status"])
+        self.assertFalse(document["ok"])
+
+    def test_an_answer_after_the_child_exited_is_not_ready(self):
+        """The started process exits; its heir holds the port and answers as it.
+
+        The stub hands the port to a copy of itself that answers -- with the
+        very instance id start.ps1 generated -- only after the process that was
+        started has exited. Identity alone cannot tell; only "our child has not
+        exited" can. And the heir, which this run cannot prove it owns, is left
+        exactly as it is.
+        """
+        self.write_config(gateway_timeout=15)
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway", env=self.script_env(LC_STUB_GATEWAY_HANDOFF="1"))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("The gateway process exited before it became ready.", output)
+        self.assertNotIn("[ OK ] Gateway ready", output)
+        self.assertIsNone(self.read_pid_file("gateway"))
+        launched = self.launched_gateway_pids()
+        self.assertEqual(2, len(launched), "expected the started gateway and its heir: " + output)
+        started, heir = launched
+        self.assertFalse(self.alive(started))
+        # Untouched: still running, and answering with the id this run generated.
+        self.assertTrue(self.alive(heir), "start.ps1 stopped a process it did not start")
+        self.assertTrue(wait_until(lambda: http_ok(self.gateway_health_url), 20))
+        self.assertEqual(document["gateway"]["instance_id"], self.info()["instance_id"])
+
+    def test_a_running_gateway_is_reused_only_with_its_recorded_id(self):
+        self.write_config()
+        _, first = self.run_json("start.ps1", "-Component", "Gateway")
+        _, again = self.run_json("start.ps1", "-Component", "Gateway")
+        self.assertEqual("reused", again["gateway"]["status"])
+        self.assertEqual(first["gateway"]["pid"], again["gateway"]["pid"])
+        self.assertEqual(first["gateway"]["instance_id"], again["gateway"]["instance_id"])
+        self.assertEqual(first["gateway"]["published_endpoint"], again["gateway"]["published_endpoint"])
+        self.assertEqual(1, len(self.launched_gateway_pids()), "a second gateway was launched")
+
+    def test_a_record_whose_id_does_not_answer_is_not_reused_and_nothing_is_stopped(self):
+        self.write_config(gateway_timeout=3)
+        _, first = self.run_json("start.ps1", "-Component", "Gateway")
+        record = self.read_pid_file("gateway")
+        record["instance_id"] = OTHER_INSTANCE_ID
+        self.write_pid_file("gateway", record)
+        rewritten = self.pid_file_bytes("gateway")
+
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("did not answer as the gateway recorded for it (instance {})".format(
+            OTHER_INSTANCE_ID), output)
+        self.assertIn("Port {} is already in use".format(self.gateway_port), output)
+        self.assertEqual("failed", document["gateway"]["status"])
+        # Nothing stopped, nothing launched, the evidence kept as it was.
+        self.assertTrue(self.alive(first["gateway"]["pid"]))
+        self.assertEqual(1, len(self.launched_gateway_pids()))
+        self.assertEqual(rewritten, self.pid_file_bytes("gateway"))
+
+    def test_a_record_from_before_instance_ids_is_not_reused_and_still_stops(self):
+        self.write_config()
+        _, first = self.run_json("start.ps1", "-Component", "Gateway")
+        record = self.read_pid_file("gateway")
+        for key in ("instance_id", "published_endpoint", "is_lan", "local_only_reason"):
+            record.pop(key)
+        self.write_pid_file("gateway", record)
+        old = self.pid_file_bytes("gateway")
+
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("its ownership record carries no instance id", output)
+        self.assertTrue(self.alive(first["gateway"]["pid"]))
+        self.assertEqual(old, self.pid_file_bytes("gateway"))
+        self.assertEqual(1, len(self.launched_gateway_pids()))
+
+        # The older record still loads, and still proves ownership for a stop.
+        stop, stopped = self.run_json("stop.ps1", "-Component", "Gateway")
+        self.assertEqual("running", stopped["roles"]["gateway"]["state_before"], self.output_of(stop))
+        self.assertEqual("stop", stopped["roles"]["gateway"]["action"])
+        self.assertTrue(wait_until(lambda: not self.alive(first["gateway"]["pid"]), 20))
+
+    def test_status_reports_identity_and_whether_it_matches_the_record(self):
+        self.write_config()
+        _, started = self.run_json("start.ps1", "-Component", "Gateway")
+        _, status = self.run_json("status.ps1")
+        gateway = status["gateway"]
+        self.assertTrue(gateway["reachable"])
+        self.assertEqual("localcanvas", gateway["identity"])
+        self.assertEqual(started["gateway"]["instance_id"], gateway["instance_id"])
+        self.assertIs(True, gateway["instance_matches_record"])
+        self.assertEqual("running", gateway["ownership"])
+        self.assertEqual(started["gateway"]["pid"], gateway["pid"])
+        self.assertEqual(started["gateway"]["published_endpoint"], gateway["published_endpoint"])
+
+        record = self.read_pid_file("gateway")
+        record["instance_id"] = OTHER_INSTANCE_ID
+        self.write_pid_file("gateway", record)
+        _, status = self.run_json("status.ps1")
+        self.assertIs(False, status["gateway"]["instance_matches_record"])
+
+
+class GatewayPortCheckTests(MachineInterfaceTestCase):
+    """Nothing is launched onto a port something already holds (the race)."""
+
+    def assert_refused_for_the_port(self, result, document):
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertEqual("Port {} is already in use".format(self.gateway_port), document["error"]["what"])
+        self.assertIn("gateway.port", document["error"]["fix"])
+        self.assertIn("Nothing on that port was touched, and no gateway was started.", output)
+        self.assertFalse(self.gateway_marker.exists(), "a gateway was launched onto a taken port")
+        self.assertIsNone(self.read_pid_file("gateway"))
+        self.assertNotIn("[ OK ] Gateway ready", output)
+        self.assert_no_stack_trace(output)
+        return output
+
+    def test_another_localcanvas_gateway_on_the_port_is_named_and_left_alone(self):
+        self.write_config()
+        harness = self.start_harness_gateway(instance_id=OTHER_INSTANCE_ID)
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("Another LocalCanvas gateway is already answering on it (instance {}).".format(
+            OTHER_INSTANCE_ID), output)
+        self.assertIsNone(harness.poll(), "start.ps1 stopped a gateway it did not start")
+        self.assertEqual(OTHER_INSTANCE_ID, self.info()["instance_id"])
+
+    def test_the_whole_start_is_refused_the_same_way(self):
+        self.write_config()
+        harness = self.start_harness_gateway(instance_id=OTHER_INSTANCE_ID)
+        result, document = self.run_json("start.ps1")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("ComfyUI (PID {}) was left running".format(document["comfy"]["pid"]), output)
+        self.assertIsNone(harness.poll())
+
+    def test_an_http_service_that_is_not_a_gateway_is_refused(self):
+        self.write_config()
+        self.start_foreign_listener("http")
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("Something that is not a LocalCanvas gateway is answering on it.", output)
+
+    def test_a_listener_that_never_answers_is_refused(self):
+        self.write_config()
+        self.start_foreign_listener("silent")
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("A program is accepting connections on it.", output)
+
+
+class JsonDocumentTests(MachineInterfaceTestCase):
+    """-Json: one document on standard output, on every exit path of every script."""
+
+    def unusable_runtime_env(self):
+        # A runtime directory that cannot be created, because a FILE is in
+        # the way: the one failure every script meets as an unexpected one.
+        blocker = self.workspace / "a file, not a directory"
+        blocker.write_text("x", encoding="utf-8")
+        return self.script_env(LOCALCANVAS_RUNTIME_DIR=str(blocker / "runtime"))
+
+    def test_start_prints_one_document_on_every_exit_path(self):
+        cases = []
+        self.write_config()
+        cases.append(("ready", 0, self.run_script("start.ps1", "-Json")))
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        cases.append(("contradictory switches", 2, self.run_script(
+            "start.ps1", "-SyncWorkflows", "-SkipWorkflowCheck", "-Json")))
+        cases.append(("missing configuration", 2, self.run_script(
+            "start.ps1", "-Json", config=self.workspace / "no such.yaml")))
+        cases.append(("unexpected", 1, self.run_script(
+            "start.ps1", "-Component", "Gateway", "-Json", env=self.unusable_runtime_env())))
+        self.write_config(comfy_timeout=3, comfy_extra_args=[
+            "--port", str(self.comfy_port), "--launch-marker", str(self.comfy_marker), "--never-ready"])
+        cases.append(("managed ComfyUI never ready", 3, self.run_script("start.ps1", "-Json")))
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        self.write_config(manage_comfy=False)
+        cases.append(("external ComfyUI down", 4, self.run_script("start.ps1", "-Json")))
+        self.write_config(gateway_timeout=3)
+        cases.append(("gateway never ready", 5, self.run_script(
+            "start.ps1", "-Component", "Gateway", "-Json",
+            env=self.script_env(LC_STUB_GATEWAY_HANG="1"))))
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        for label, code, result in cases:
+            with self.subTest(path=label):
+                self.assertEqual(code, result.returncode, self.output_of(result))
+                document = self.json_document(result)
+                self.assertIs(code == 0, document["ok"])
+                self.assertEqual(code == 0, document["error"] is None)
+                for key in ("component", "comfy", "gateway", "workflows"):
+                    self.assertIn(key, document)
+                # The human lines are all on standard error.
+                if code:
+                    self.assertIn("[FAIL] " + document["error"]["what"], result.stderr)
+
+    def test_the_success_document_carries_what_the_launcher_needs(self):
+        self.write_config(gateway_host="0.0.0.0")
+        result, document = self.run_json("start.ps1")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertEqual("All", document["component"])
+        self.assertEqual("ready", document["comfy"]["status"])
+        self.assertEqual("owned", document["comfy"]["ownership"])
+        self.assertEqual(self.read_pid_file("comfy")["pid"], document["comfy"]["pid"])
+        gateway = document["gateway"]
+        self.assertEqual("ready", gateway["status"])
+        self.assertEqual(self.read_pid_file("gateway")["pid"], gateway["pid"])
+        self.assertRegex(gateway["instance_id"], INSTANCE_ID)
+        self.assertIsInstance(gateway["is_lan"], bool)
+        self.assertTrue(gateway["published_endpoint"].endswith(":{}".format(self.gateway_port)))
+        self.assertEqual("not_configured", document["workflows"]["status"])
+        # Every human line went to standard error, including the readiness block.
+        self.assertIn("[ OK ] LocalCanvas is ready", result.stderr)
+        self.assertIn("localcanvas://connect?endpoint=", result.stderr)
+
+    def test_a_reused_comfyui_is_reported_as_reused(self):
+        stub = self.start_backend_stub()
+        self.write_config()
+        _, document = self.run_json("start.ps1")
+        self.assertEqual({"status": "ready", "url": "http://127.0.0.1:{}".format(self.comfy_port),
+                          "ownership": "reused", "pid": None}, document["comfy"])
+        self.assertIsNone(stub.poll())
+        self.write_config(manage_comfy=False)
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        _, document = self.run_json("start.ps1")
+        self.assertEqual("external", document["comfy"]["ownership"])
+
+    def test_stop_prints_one_document_on_every_exit_path(self):
+        self.write_config()
+        self.assertEqual(0, self.run_script("start.ps1").returncode)
+        comfy_pid = self.read_pid_file("comfy")["pid"]
+        result, document = self.run_json("stop.ps1")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertTrue(document["ok"])
+        self.assertEqual("All", document["component"])
+        self.assertEqual("stop", document["roles"]["comfy"]["action"])
+        self.assertEqual(comfy_pid, document["roles"]["comfy"]["pid"])
+        self.assertIn(document["roles"]["comfy"]["result"], ("exited", "terminated"))
+
+        # Nothing owned: 'none', and nothing done.
+        result, document = self.run_json("stop.ps1")
+        self.assertEqual({"state_before": "none", "action": "none", "result": None, "pid": None},
+                         document["roles"]["gateway"])
+
+        # An unprovable record: kept, and said so.
+        idle = self.start_idle_process()
+        self.write_pid_file("gateway", self.unprovable_record(idle.pid, role="gateway"))
+        _, document = self.run_json("stop.ps1")
+        self.assertEqual("unproven", document["roles"]["gateway"]["state_before"])
+        self.assertEqual("record_kept", document["roles"]["gateway"]["action"])
+        self.assertIsNone(idle.poll())
+        (self.runtime_dir / "gateway.pid").unlink()
+
+        # Exit 1: a record that is a directory with something in it cannot be
+        # read or removed.
+        broken = self.runtime_dir / "gateway.pid"
+        broken.mkdir(parents=True)
+        (broken / "inside").write_text("x", encoding="utf-8")
+        result = self.run_script("stop.ps1", "-Json")
+        self.assertEqual(1, result.returncode, self.output_of(result))
+        document = self.json_document(result)
+        self.assertFalse(document["ok"])
+        self.assertEqual("Stopping LocalCanvas did not complete", document["error"]["what"])
+        shutil.rmtree(broken)
+
+    def test_status_prints_one_document_and_creates_nothing(self):
+        self.write_config()
+        before = sorted(str(path) for path in self.workspace.rglob("*"))
+        result, document = self.run_json("status.ps1")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertEqual(before, sorted(str(path) for path in self.workspace.rglob("*")),
+                         "status.ps1 -Json created something")
+        self.assertFalse(self.runtime_dir.exists())
+        self.assertTrue(document["config_ok"])
+        self.assertEqual("managed", document["mode"])
+        self.assertEqual({"url": "http://127.0.0.1:{}".format(self.comfy_port), "healthy": False,
+                          "ownership": "none"}, document["comfy"])
+        self.assertEqual("none", document["gateway"]["identity"])
+        self.assertIs(False, document["gateway"]["reachable"])
+        self.assertIsNone(document["gateway"]["instance_matches_record"])
+
+        result = self.run_script("status.ps1", "-Json", config=self.workspace / "no such.yaml")
+        self.assertEqual(2, result.returncode)
+        document = self.json_document(result)
+        self.assertFalse(document["config_ok"])
+        self.assertIsNone(document["mode"])
+
+        self.write_config(body=self.config_path.read_text(encoding="utf-8").replace(
+            "  port: {}\nstartup".format(self.gateway_port), "  port: not-a-port\nstartup"))
+        result = self.run_script("status.ps1", "-Json")
+        self.assertEqual(1, result.returncode, self.output_of(result))
+        self.json_document(result)
+        self.assertFalse(self.runtime_dir.exists())
+
+    def test_status_says_foreign_for_an_answer_that_is_not_a_gateway(self):
+        self.write_config()
+        self.start_foreign_listener("http")
+        _, document = self.run_json("status.ps1")
+        self.assertEqual("foreign", document["gateway"]["identity"])
+        self.assertIs(False, document["gateway"]["reachable"])
+
+
+class SyncJsonTests(StartWorkflowTestCase, MachineInterfaceTestCase):
+    """sync-workflows.ps1 -Json: compact, and the same arithmetic as start.ps1."""
+
+    def run_sync_json(self, *extra_args, mode="tree", config=None, env=None):
+        result = self.run_script(
+            "sync-workflows.ps1", "-RuntimeConfig", str(self.config_path), *extra_args, "-Json",
+            config=config if config is not None else self.sources_config,
+            env=env if env is not None else self.sync_env(mode=mode))
+        return result, self.json_document(result)
+
+    def test_changes_and_attention_are_the_numbers_start_acts_on(self):
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=7))
+        self.write_workflow("a canvas.json", self.editor_graph())
+        self.write_workflow("not a workflow.json", self.ambiguous_document())
+
+        start, started = self.run_json(
+            "start.ps1", "-Component", "All", "-WorkflowSources", str(self.sources_config),
+            env=self.sync_env())
+        self.assertEqual(0, start.returncode, self.output_of(start))
+        workflows = started["workflows"]
+        self.assertEqual("checked", workflows["status"])
+        self.assertEqual("unasked", workflows["sync"]["answer"])
+
+        result, document = self.run_sync_json("-DryRun", "-NoConvert")
+        self.assertEqual(3, result.returncode, self.output_of(result))
+        self.assertTrue(document["ok"], "attention is not a failure")
+        self.assertIsNone(document["error"])
+        self.assertIs(True, document["dry_run"])
+        self.assertIs(True, document["no_convert"])
+        for key in ("changes", "attention", "new", "changed", "retry", "removed"):
+            self.assertEqual(workflows[key], document[key], key)
+        self.assertGreater(document["changes"], 0)
+        self.assertGreater(document["attention"], 0)
+        self.assertIsInstance(document["counts"], dict)
+        self.assertIn("unconverted_editor", document)
+        self.assertTrue(document["summary"])
+        self.assertEqual(0, document["definitions_written"])
+        names = {item["state"] for item in document["attention_items"]}
+        self.assertIn("NEEDS_REVIEW", names)
+        for item in document["attention_items"]:
+            self.assertEqual({"id", "state", "reason"}, set(item))
+            self.assertNotIn("\n", item["reason"] or "")
+        # Compact: not the engine's whole report.
+        self.assertNotIn("workflows", document)
+        self.assertNotIn("sources", document)
+
+    def test_a_real_sync_reports_the_definitions_it_wrote(self):
+        self.write_workflow("one.json", self.api_graph(seed=1))
+        self.write_workflow("two.json", self.api_graph(seed=2))
+        result, document = self.run_sync_json()
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertTrue(document["ok"])
+        self.assertIs(False, document["dry_run"])
+        self.assertEqual(2, document["definitions_written"])
+        self.assertEqual(2, document["new"])
+        self.assertEqual([], document["attention_items"])
+
+    def test_attention_items_are_capped_at_fifty(self):
+        for number in range(53):
+            self.write_workflow("broken {:02d}.json".format(number), self.ambiguous_document())
+        result, document = self.run_sync_json("-DryRun")
+        self.assertEqual(3, result.returncode, self.output_of(result))
+        self.assertEqual(50, len(document["attention_items"]))
+        self.assertEqual(53, document["attention_items_total"])
+        self.assertEqual(53, document["attention"])
+
+    def test_every_exit_path_prints_one_document(self):
+        cases = (
+            ("attention", 3, dict(mode="attention")),
+            ("engine refused the configuration", 2, dict(mode="fatal")),
+            ("engine printed garbage", 1, dict(mode="garbage")),
+            ("engine crashed", 1, dict(mode="crash")),
+            ("no source list", 2, dict(config=self.workspace / "no such sources.yaml")),
+        )
+        for label, code, arguments in cases:
+            with self.subTest(path=label):
+                result, document = self.run_sync_json(**arguments)
+                self.assertEqual(code, result.returncode, self.output_of(result))
+                self.assertIs(code in (0, 3), document["ok"])
+                if code in (0, 3):
+                    self.assertIsNone(document["error"])
+                else:
+                    self.assertIsNotNone(document["error"])
+                    self.assertIsNone(document["counts"])
+
+    def test_start_json_with_a_sync_keeps_the_sync_document_off_stdout(self):
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=9))
+        result, document = self.run_json(
+            "start.ps1", "-SyncWorkflows", "-WorkflowSources", str(self.sources_config),
+            env=self.sync_env())
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        sync = document["workflows"]["sync"]
+        self.assertEqual("yes", sync["answer"])
+        self.assertEqual(0, sync["exit_code"])
+        self.assertEqual(1, sync["definitions_written"])
+        self.assertIn("LocalCanvas workflow sync", result.stderr)
+
+
+class HiddenConsoleTests(StartWorkflowTestCase, MachineInterfaceTestCase):
+    """The launcher's shape: no window, no -NonInteractive, nobody to ask."""
+
+    def run_hidden(self, name, *arguments, env=None, deadline=240):
+        """Run a script the way the launcher will: no window of its own, no
+        -NonInteractive, standard input the null device."""
+        command = [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", str(SCRIPTS / name), "-PythonExe", sys.executable] + list(arguments)
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env if env is not None else self.sync_env(), cwd=str(REPO),
+            creationflags=OWN_CONSOLE)
+        self.owned_stubs.append(process)
+        try:
+            out, err = process.communicate(timeout=deadline)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=30)
+            self.fail("{} {} was still running after {}s -- it waited on something".format(
+                name, " ".join(arguments), deadline))
+        return subprocess.CompletedProcess(command, process.returncode,
+                                           out.decode("utf-8", "replace"),
+                                           err.decode("utf-8", "replace"))
+
+    def test_no_script_asks_anything_and_stdout_is_only_the_document(self):
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=11))
+        runs = (
+            ("start.ps1", "-Config", str(self.config_path), "-WorkflowSources", str(self.sources_config)),
+            ("status.ps1", "-Config", str(self.config_path)),
+            ("sync-workflows.ps1", "-Config", str(self.sources_config),
+             "-RuntimeConfig", str(self.config_path), "-DryRun", "-NoConvert"),
+            ("stop.ps1", "-Config", str(self.config_path)),
+        )
+        for name, *arguments in runs:
+            with self.subTest(script=name):
+                result = self.run_hidden(name, *arguments, "-Json")
+                self.assertIn(result.returncode, (0, 3), self.output_of(result))
+                document = self.json_document(result)
+                if name == "start.ps1":
+                    # Something changed, and nobody was asked about it.
+                    self.assertEqual("unasked", document["workflows"]["sync"]["answer"])
+                    self.assertEqual([], self.sync_invocations())
+
+    def test_start_json_does_not_wait_on_an_open_standard_input(self):
+        """An open pipe nobody writes to: the shape in which a prompt blocks for ever."""
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=12))
+        out_path = self.workspace / "hidden.out.log"
+        err_path = self.workspace / "hidden.err.log"
+        command = [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", str(SCRIPTS / "start.ps1"), "-Config", str(self.config_path),
+                   "-PythonExe", sys.executable, "-WorkflowSources", str(self.sources_config), "-Json"]
+        with open(out_path, "wb") as out, open(err_path, "wb") as err:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                                       env=self.sync_env(), cwd=str(REPO), creationflags=OWN_CONSOLE)
+            self.owned_stubs.append(process)
+            try:
+                code = process.wait(timeout=240)
+            except subprocess.TimeoutExpired:
+                code = None
+                process.kill()
+                process.wait(timeout=30)
+            finally:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+        self.assertEqual(0, code, err_path.read_text(encoding="utf-8", errors="replace"))
+        result = subprocess.CompletedProcess(
+            command, code, out_path.read_text(encoding="utf-8"),
+            err_path.read_text(encoding="utf-8", errors="replace"))
+        document = self.json_document(result)
+        self.assertEqual("unasked", document["workflows"]["sync"]["answer"])
+
+
 CI_GROUP_OPTION = "--ci-group"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 
@@ -24686,11 +25481,12 @@ CI_GROUPS = {
     "runtime-launch": [
         "ProcessOwnershipLintTests", "InlineCodeQuoteLintTests", "ReadinessContractTests",
         "ConfigurationTests", "ConfigurationSeamTests", "EndpointOwnershipTests",
-        "ManagedModeTests", "ChildStreamEncodingTests",
+        "ManagedModeTests", "ChildStreamEncodingTests", "ComponentTests", "GatewayPortCheckTests",
     ],
     "runtime-stop": [
         "RedirectedChildLaunchTests", "ExternalModeTests", "StopTests", "ProcessIdentityTests",
         "OwnershipDecisionTests", "RuntimeDirectoryTests", "StatusTests",
+        "GatewayIdentityTests", "JsonDocumentTests",
     ],
     "runtime-ownership": [
         "OwnershipRecordLifecycleTests", "UnidentifiedGatewayTests",
@@ -24723,7 +25519,7 @@ CI_GROUPS = {
     ],
     "sync-and-comfy-install": [
         "WorkflowSyncTests", "StartWorkflowCheckTests", "StartWorkflowMutationTests",
-        "ComfyDryRunTests", "ComfyInstallTests",
+        "ComfyDryRunTests", "ComfyInstallTests", "SyncJsonTests", "HiddenConsoleTests",
     ],
     "comfy-bootstrap": [
         "ComfyExistingInstallationTests", "ComfyLinkedPathTests", "ComfyRefusalTests",
