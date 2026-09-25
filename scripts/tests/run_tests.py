@@ -866,6 +866,37 @@ def powershell_literal(text):
     return "'" + str(text).replace("'", "''") + "'"
 
 
+def held_process_handles_script():
+    """Lines that read the launcher's own kept-on-purpose process handles.
+
+    ``LocalCanvas.ChildProcess`` (lib/Common.ps1) keeps one process handle
+    per launch in a private static list, for the life of the process that
+    launched them -- the retention the handle-count test is about. This
+    reads that list by reflection, rather than adding a public accessor to
+    production code for a test to call, and resolves each handle to the
+    process id it actually refers to (0 if the handle is no longer valid),
+    so a handle that was kept on the list but closed anyway is caught, not
+    just one that was never added.
+    """
+    return [
+        "$heldField = [LocalCanvas.ChildProcess].GetField(",
+        "    'Held', [System.Reflection.BindingFlags]::NonPublic -bor "
+        "[System.Reflection.BindingFlags]::Static)",
+        "$held = @($heldField.GetValue($null))",
+        "if (-not ('LcTestOwnedHandle' -as [type])) {",
+        "    Add-Type -TypeDefinition @'",
+        "using System;",
+        "using System.Runtime.InteropServices;",
+        "public static class LcTestOwnedHandle {",
+        "    [DllImport(\"kernel32.dll\", SetLastError = true)]",
+        "    public static extern int GetProcessId(IntPtr handle);",
+        "}",
+        "'@",
+        "}",
+        "$heldPids = @($held | ForEach-Object { [LcTestOwnedHandle]::GetProcessId($_) })",
+    ]
+
+
 # The variable that opts a run into checks whose verdict depends on machine
 # state outside the suite's control.
 INTEGRATION_VARIABLE = "LOCALCANVAS_INTEGRATION"
@@ -3321,9 +3352,20 @@ class RedirectedChildLaunchTests(ScriptTestCase):
         primary thread. Four must be closed, and exactly one -- the process
         handle -- is kept on purpose, so that Windows cannot hand the child's
         process id to anything else while the script that started it is still
-        running. So the growth of the launcher's own handle count over N
-        launches is N, plus whatever .NET's own Process objects are holding,
-        and never the 4N or 5N a missed close would show.
+        running.
+
+        The retention is asserted directly rather than inferred from the whole
+        process's HandleCount: that count also moves with unrelated handles
+        (runtime/thread-pool/GC finalisation) opened and released in the same
+        window, which made a bound on it fail intermittently even though the
+        launcher itself was behaving. What the launcher keeps is reachable --
+        it is a private list inside the same process, read here by reflection
+        -- so the count of what is actually held, and the identity of the
+        child process each held handle refers to, are checked exactly instead
+        of guessed at from a number that other code also moves. The leak
+        guard stays a ceiling on the whole process's handle growth: it has
+        never been the flaky side, and a single unclosed handle per launch
+        still lands well above it.
         """
         script = "\n".join([
             "$workspace = {}".format(powershell_literal(self.workspace)),
@@ -3343,10 +3385,13 @@ class RedirectedChildLaunchTests(ScriptTestCase):
             # So that a handle merely awaiting collection is not counted as one
             # that was never released.
             "[GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()",
+            "$after = Get-HandleCount",
+        ] + held_process_handles_script() + [
             "[pscustomobject]@{",
             "    Before = $before",
-            "    After = Get-HandleCount",
+            "    After = $after",
             "    Launched = @($launched)",
+            "    HeldPids = @($heldPids)",
             "} | ConvertTo-Json -Compress",
         ])
         result = self.run_powershell(script)
@@ -3356,18 +3401,30 @@ class RedirectedChildLaunchTests(ScriptTestCase):
         self.assertEqual(self.LAUNCHES, len(measured["Launched"]))
         self.assertEqual(len(set(measured["Launched"])), len(measured["Launched"]),
                          "two launches came back with the same process id")
+
+        # -- kept on purpose: measured directly, not inferred -------------
+        held = measured["HeldPids"]
+        self.assertEqual(
+            self.LAUNCHES, len(held),
+            "the launcher is holding {} process handles for {} launches, not "
+            "one each".format(len(held), self.LAUNCHES))
+        self.assertNotIn(
+            0, held,
+            "a handle the launcher keeps on purpose no longer refers to a "
+            "live process (GetProcessId returned 0): {}".format(held))
+        self.assertEqual(
+            sorted(measured["Launched"]), sorted(held),
+            "the handles the launcher keeps on purpose do not match the "
+            "children it launched: kept {}, launched {}".format(
+                sorted(held), sorted(measured["Launched"])))
+
+        # -- no leak: a ceiling on the whole process's handle growth -------
         growth = measured["After"] - measured["Before"]
-        # The lower bound is the retention this code documents: without it the
-        # measurement would be about nothing. The upper bound is what makes it
-        # a guard -- a single unclosed handle per launch lands above it.
-        self.assertGreaterEqual(
-            growth, self.LAUNCHES,
-            "the process handle this launcher keeps on purpose is not being kept "
-            "({} launches, {} more handles)".format(self.LAUNCHES, growth))
         self.assertLessEqual(
             growth, 2 * self.LAUNCHES,
             "the launcher leaked handles: {} launches left {} more handles open, "
             "and it opens five and keeps one".format(self.LAUNCHES, growth))
+
         # And the children really were started and really ended: the count
         # above must not be a count of launches that did nothing.
         for pid in measured["Launched"]:
