@@ -33,7 +33,7 @@ visible in the terminal rather than discovered later from an import error
 (`docs/runtime.md`).
 
 ``--instance-id`` names *this process*, not this build: something watching the
-gateway from outside (a launcher, a supervisor) needs to tell one running
+gateway from outside (a launcher or process monitor) needs to tell one running
 gateway apart from a different one that happens to be listening on the same
 port.  It is 32 lowercase hex characters, checked before anything else runs;
 left out, one is generated (`secrets.token_hex(16)`), so every gateway that
@@ -78,9 +78,12 @@ _INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 
 
 def _instance_id_argument(value: str) -> str:
+    # argparse prepends "argument --instance-id: " to this message itself, so
+    # the flag's name is not repeated here -- naming it twice is what a
+    # person actually saw before this fix.
     if not _INSTANCE_ID_PATTERN.fullmatch(value):
         raise argparse.ArgumentTypeError(
-            "--instance-id must be exactly 32 lowercase hex characters, got {!r}".format(value)
+            "must be exactly 32 lowercase hex characters, got {!r}".format(value)
         )
     return value
 
@@ -396,7 +399,14 @@ def _uvicorn_serve(app: Any, *, host: str, port: int) -> None:
 
 
 def _qr_command(argv: Sequence[str], out: TextIO, err: TextIO) -> int:
-    args = build_qr_parser().parse_args(argv)
+    parser = build_qr_parser()
+    args = parser.parse_args(argv)
+
+    if args.scale is not None and args.png is None:
+        # ``--scale`` is pixels *per PNG module*; without ``--png`` there is no
+        # PNG for it to size, so silently ignoring it would let a typo'd
+        # command look like it had done something.
+        parser.error("--scale requires --png")
 
     endpoint = args.endpoint
     if endpoint is None:

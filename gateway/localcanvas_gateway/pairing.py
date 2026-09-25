@@ -152,6 +152,12 @@ def _png_scale(code: Any) -> int:
 def pairing_qr_png(endpoint: str, path: Any, *, scale: Optional[int] = None) -> None:
     """Write the pairing QR as a PNG at ``path`` -- the same payload, drawn.
 
+    ``kind="png"`` is explicit and never left for ``segno`` to guess from
+    ``path``'s extension: left implicit, a ``.svg`` path silently writes an
+    SVG and a path with no extension (or a directory) raises deep inside
+    ``segno`` instead of through this function's documented error path.  This
+    is a PNG regardless of what ``path`` is named.
+
     ``scale`` is pixels per module.  Left out, one is picked so the image
     comes out roughly 300-400 px on a side regardless of how long the
     endpoint is (`_png_scale`).  Raises whatever writing ``path`` raises: a
@@ -160,7 +166,7 @@ def pairing_qr_png(endpoint: str, path: Any, *, scale: Optional[int] = None) -> 
     """
 
     code = segno.make(pairing_payload(endpoint), error="m")
-    code.save(path, scale=scale if scale is not None else _png_scale(code))
+    code.save(path, kind="png", scale=scale if scale is not None else _png_scale(code))
 
 
 __all__ = [

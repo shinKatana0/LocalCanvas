@@ -31,7 +31,7 @@ human-readable string when not `ready`, never a stack trace.
 `instance_id` — 32 lowercase hex characters identifying **this running
 process**, not this build. It changes on every gateway start (`--instance-id`
 on the command line names one explicitly; left out, the gateway generates one)
-and is how something watching from outside — a launcher, a supervisor — tells
+and is how something watching from outside — a launcher or process monitor — tells
 this gateway apart from a different one that happens to be listening on the
 same port. A client that only needs compatibility keeps checking `service` and
 `api_version`, exactly as before this key existed.

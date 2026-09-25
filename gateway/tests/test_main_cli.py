@@ -269,6 +269,28 @@ def test_an_instance_id_is_generated_and_logged_when_none_is_given(
     assert match, out
 
 
+def test_the_generated_instance_id_is_the_one_the_app_actually_carries(
+    configured: Path,
+) -> None:
+    """The banner and the running app must agree, not merely both have an id.
+
+    A CLI that generated one id for the banner and handed a *different* one
+    (or the untouched, still-``None`` ``args.instance_id``) to the gateway it
+    builds would pass `test_an_instance_id_is_generated_and_logged_when_none_is_given`
+    above without anyone noticing -- that test only checks the banner's shape.
+    This checks the two are the same value.
+    """
+
+    recorder = Recorder()
+    _, out, _ = run(
+        ["--config", str(configured), "--no-mdns", "--no-qr"], serve=recorder
+    )
+
+    match = re.search(r"\[INFO\] Instance: ([0-9a-f]{32})", out)
+    assert match, out
+    assert recorder.calls[0]["app"].state.gateway.instance_id == match.group(1)
+
+
 def test_an_explicit_instance_id_is_used_and_logged(configured: Path) -> None:
     given = "ab" * 16
     recorder = Recorder()
@@ -299,12 +321,33 @@ def test_two_gateways_started_with_no_instance_id_do_not_collide(
 def test_a_malformed_instance_id_is_the_gateways_normal_argument_error(
     configured: Path,
 ) -> None:
-    """Too short, upper case, or not hex -- all rejected the same way ``--port``
-    rejects a non-integer: by argparse itself, before anything else runs."""
+    """Too short, too long, upper case, not hex, or trailing a stray byte --
+    all rejected the same way ``--port`` rejects a non-integer: by argparse
+    itself, before anything else runs, with the configured registry and
+    ComfyUI never touched.
 
-    for bad in ("not-hex", "AB" * 16, "ab" * 15, ""):
-        with pytest.raises(SystemExit):
-            run(["--config", str(configured), "--instance-id", bad, "--no-mdns", "--no-qr"])
+    ``"ab" * 16 + "0"`` (33 characters) and ``"ab" * 16 + "\\n"`` are the two
+    cases a validator using ``re.match`` instead of ``re.fullmatch`` would
+    wrongly accept: ``match`` only anchors at the start, so 32 valid
+    characters followed by one more still "matches" the pattern.
+    """
+
+    for bad in (
+        "not-hex",
+        "AB" * 16,
+        "ab" * 15,
+        "",
+        "ab" * 16 + "0",
+        "ab" * 16 + "\n",
+    ):
+        recorder = Recorder()
+        with pytest.raises(SystemExit) as excinfo:
+            run(
+                ["--config", str(configured), "--instance-id", bad, "--no-mdns", "--no-qr"],
+                serve=recorder,
+            )
+        assert excinfo.value.code == 2, bad
+        assert recorder.calls == [], bad
 
 
 # -- failures are readable -------------------------------------------------
@@ -514,11 +557,12 @@ def test_qr_png_writes_a_real_png_of_the_exact_payload(tmp_path: Path, monkeypat
     """The file is a PNG, and it is a PNG of *this* payload.
 
     No QR decoder is available in this test environment (checked: pyzbar,
-    zxingcpp, cv2, qrcode are all absent) and installing one is not this
-    card's dependency to add -- ``segno`` is the only one it names. So this
-    is the fallback the test discipline calls for: `segno.make`, the one call
-    that actually turns a string into a code, is spied on rather than
-    mocked -- it still runs -- to prove which string reached it. **Not
+    zxingcpp, cv2, qrcode are all absent) and adding one would be a new
+    dependency this project does not otherwise need -- ``segno`` is the only
+    QR library it uses. So this is the fallback the test discipline calls
+    for: `segno.make`, the one call that actually turns a string into a code,
+    is spied on rather than mocked -- it still runs -- to prove which string
+    reached it. **Not
     verified here:** that the pixels this PNG draws would themselves decode
     back to that string through a camera; only that a real PNG was written
     and that encoding it started from the exact payload the terminal
@@ -573,6 +617,44 @@ def test_qr_png_write_failure_is_the_commands_normal_error_path(tmp_path: Path) 
 
     assert code == 2
     assert "[FAIL] The QR image could not be written" in err
+
+
+def test_qr_png_is_always_a_png_whatever_the_paths_extension(tmp_path: Path) -> None:
+    """The format is decided by ``--png``, never guessed from the filename.
+
+    Left to guess from the extension, the underlying library writes an SVG
+    for a ``.svg`` path and raises for one with no recognised extension at
+    all -- neither is what a caller who typed ``--png`` asked for.
+    """
+
+    for name in ("pairing.svg", "pairing.jpg", "pairing"):
+        path = tmp_path / name
+        code, _, _ = run(["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(path)])
+
+        assert code == 0, name
+        assert path.read_bytes()[:8] == _PNG_SIGNATURE, name
+
+
+def test_qr_png_to_a_directory_fails_without_a_traceback(tmp_path: Path) -> None:
+    """A directory cannot be opened for writing -- this is a normal failure,
+    not an unhandled exception, whatever extension-guessing would have raised
+    instead."""
+
+    code, out, err = run(["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(tmp_path)])
+
+    assert code == 2
+    assert "[FAIL] The QR image could not be written" in err
+    assert "Traceback" not in out and "Traceback" not in err
+
+
+def test_scale_without_png_is_rejected() -> None:
+    """``--scale`` sizes a PNG module; without ``--png`` there is no PNG, so a
+    typo'd command must not silently do nothing."""
+
+    with pytest.raises(SystemExit) as excinfo:
+        run(["qr", "--endpoint", "http://198.51.100.3:7801", "--scale", "2"])
+
+    assert excinfo.value.code == 2
 
 
 # -- the terminal stays readable -------------------------------------------
