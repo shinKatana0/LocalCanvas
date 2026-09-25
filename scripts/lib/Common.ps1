@@ -589,6 +589,19 @@ function Write-LcResultDocument {
     Write-Output (ConvertTo-Json -InputObject $Document -Depth 12 -Compress -EscapeHandling EscapeNonAscii)
 }
 
+function Write-LcResultFallback {
+    <#
+        The document for the one path where the real one could not be
+        composed: the envelope alone, built without ConvertTo-Json, so that a
+        caller still gets exactly one document and the exit code in it. The
+        reason goes to standard error with the other human lines.
+    #>
+    param([Parameter(Mandatory)][int]$ExitCode, [string]$Reason = '')
+    [Console]::Error.WriteLine("[FAIL] The result document could not be composed: $Reason")
+    Write-Output ('{"result_version":1,"ok":false,"exit_code":' + $ExitCode +
+        ',"error":{"what":"The result document could not be composed","detail":null,"fix":null}}')
+}
+
 # --------------------------------------------------------------------------
 # Repository layout
 # --------------------------------------------------------------------------
