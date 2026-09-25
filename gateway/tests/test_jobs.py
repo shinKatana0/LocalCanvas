@@ -74,6 +74,35 @@ def test_the_lifecycle_follows_comfyui(store, fake_comfy):
     assert job_store.snapshot(job.job_id).state is JobState.COMPLETED
 
 
+def test_active_count_counts_queued_and_running_and_nothing_else(store, fake_comfy):
+    """`api/info.py`'s ``jobs.active`` -- driven through real states, not a stub.
+
+    Five jobs, one in each state: only the two that are not yet over should be
+    counted, and each is put there the same way the lifecycle test above puts
+    a job in it -- by moving the fake backend and letting the store refresh.
+    """
+
+    job_store, _ = store
+    queued, _ = submit(store, fake_comfy)
+
+    running, running_prompt = submit(store, fake_comfy)
+    fake_comfy.start_running(running_prompt)
+    assert job_store.snapshot(running.job_id).state is JobState.RUNNING
+
+    completed, completed_prompt = submit(store, fake_comfy)
+    fake_comfy.complete(completed_prompt)
+    assert job_store.snapshot(completed.job_id).state is JobState.COMPLETED
+
+    failed, failed_prompt = submit(store, fake_comfy)
+    fake_comfy.fail(failed_prompt)
+    assert job_store.snapshot(failed.job_id).state is JobState.FAILED
+
+    cancelled, _ = submit(store, fake_comfy)
+    assert job_store.cancel(cancelled.job_id).state is JobState.CANCELLED
+
+    assert job_store.active_count() == 2
+
+
 def test_a_completed_job_carries_its_results(store, fake_comfy):
     job_store, _ = store
     job, prompt_id = submit(store, fake_comfy)
