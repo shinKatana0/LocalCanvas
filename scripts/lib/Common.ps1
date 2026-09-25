@@ -451,27 +451,51 @@ function Start-LcRedirectedChild {
 # Terminal vocabulary (docs/runtime.md, "Startup output")
 # --------------------------------------------------------------------------
 
-function Write-LcBanner {
-    Write-Host ''
-    Write-Host 'LocalCanvas'
-    Write-Host ''
+# Where the human-readable lines go. The terminal, normally. With -Json
+# (docs/runtime.md, "Machine interface") standard output carries exactly one
+# JSON document and nothing else, so every human line goes to standard error
+# instead -- where a caller can keep it as details -- and not one of them may
+# reach standard output by another route. That is why every line this
+# vocabulary writes, blank ones included, goes through Write-LcLine.
+$script:LcHumanToStandardError = $false
+# What the last Write-LcFailure said, so a -Json run can put the same words in
+# its document's "error" instead of composing a second description.
+$script:LcLastFailure = $null
+
+function Enable-LcMachineOutput {
+    $script:LcHumanToStandardError = $true
 }
 
-function Write-LcInfo { param([string]$Message) Write-Host "[INFO] $Message" }
-function Write-LcOk { param([string]$Message) Write-Host "[ OK ] $Message" }
-function Write-LcWarn { param([string]$Message) Write-Host "[WARN] $Message" }
-function Write-LcFail { param([string]$Message) Write-Host "[FAIL] $Message" }
+function Write-LcLine {
+    param([AllowEmptyString()][string]$Text = '')
+    if ($script:LcHumanToStandardError) {
+        [Console]::Error.WriteLine($Text)
+    } else {
+        Write-Host $Text
+    }
+}
+
+function Write-LcBanner {
+    Write-LcLine ''
+    Write-LcLine 'LocalCanvas'
+    Write-LcLine ''
+}
+
+function Write-LcInfo { param([string]$Message) Write-LcLine "[INFO] $Message" }
+function Write-LcOk { param([string]$Message) Write-LcLine "[ OK ] $Message" }
+function Write-LcWarn { param([string]$Message) Write-LcLine "[WARN] $Message" }
+function Write-LcFail { param([string]$Message) Write-LcLine "[FAIL] $Message" }
 
 function Write-LcDetail {
     param([string]$Message)
-    foreach ($line in ($Message -split "`r?`n")) { Write-Host "       $line" }
+    foreach ($line in ($Message -split "`r?`n")) { Write-LcLine "       $line" }
 }
 
 function Write-LcField {
     param([string]$Label, [string]$Value)
-    Write-Host ''
-    Write-Host "       ${Label}:"
-    foreach ($line in ($Value -split "`r?`n")) { Write-Host "       $line" }
+    Write-LcLine ''
+    Write-LcLine "       ${Label}:"
+    foreach ($line in ($Value -split "`r?`n")) { Write-LcLine "       $line" }
 }
 
 <#
@@ -486,7 +510,12 @@ function Write-LcFailure {
         [string]$Fix,
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
-    Write-Host ''
+    $script:LcLastFailure = [ordered]@{
+        what   = $What
+        detail = $(if (@($Detail).Count -gt 0) { (@($Detail) | ForEach-Object { "$_" }) -join "`n" } else { $null })
+        fix    = $(if ($Fix) { $Fix } else { $null })
+    }
+    Write-LcLine ''
     Write-LcFail $What
     foreach ($line in $Detail) { Write-LcDetail $line }
     if ($Fix) { Write-LcDetail $Fix }
@@ -504,7 +533,73 @@ function Write-LcFailure {
             # Diagnostics must never become the failure being reported.
         }
     }
-    Write-Host ''
+    Write-LcLine ''
+}
+
+function Get-LcLastFailure {
+    # The last Write-LcFailure of this run, as { what; detail; fix }, or $null.
+    return $script:LcLastFailure
+}
+
+function New-LcResultDocument {
+    <#
+        The envelope every -Json document shares (docs/runtime.md, "Machine
+        interface"): result_version, ok, exit_code and error. The caller adds
+        its own fields to what this returns.
+
+        error is $null on success. On any other exit it is the last failure
+        this run reported, in the words it reported it with -- or, when none
+        was reported, a sentence naming the exit code rather than nothing.
+    #>
+    param(
+        [Parameter(Mandatory)][int]$ExitCode,
+        [Parameter(Mandatory)][bool]$Ok
+    )
+    $failure = $null
+    if (-not $Ok) {
+        $failure = Get-LcLastFailure
+        if ($null -eq $failure) {
+            $failure = [ordered]@{ what = "Exited with code $ExitCode"; detail = $null; fix = $null }
+        }
+    }
+    return [ordered]@{
+        result_version = 1
+        ok             = $Ok
+        exit_code      = $ExitCode
+        error          = $failure
+    }
+}
+
+function Write-LcResultDocument {
+    <#
+        Write one -Json document to standard output: a single line of JSON,
+        and nothing else.
+
+        Non-ASCII characters are written as \u escapes, so the bytes on the
+        stream are ASCII -- and therefore UTF-8, with no byte-order mark --
+        whatever code page this console happens to have. Changing the
+        console's encoding instead would change state this script does not
+        own (sync-workflows.ps1, Test-LcTerminalCanWrite).
+
+        Write-Output rather than a write to the console stream, so that one of
+        these scripts run by another with `&` hands its document to the caller
+        instead of printing it into the caller's own standard output.
+    #>
+    param([Parameter(Mandatory)]$Document)
+    Write-Output (ConvertTo-Json -InputObject $Document -Depth 12 -Compress -EscapeHandling EscapeNonAscii)
+}
+
+function Write-LcResultFallback {
+    <#
+        The document for the one path where the real one could not be
+        composed: the envelope alone, built without ConvertTo-Json, so that a
+        caller still gets exactly one document and the exit code in it. The
+        reason goes to standard error with the other human lines.
+    #>
+    param([Parameter(Mandatory)][int]$ExitCode, [string]$Reason = '')
+    [Console]::Error.WriteLine("[FAIL] The result document could not be composed: $Reason")
+    Write-Output ('{"result_version":1,"ok":false,"exit_code":' + $ExitCode +
+        ',"error":{"what":"The result document could not be composed","detail":null,"fix":null}}')
 }
 
 # --------------------------------------------------------------------------
@@ -1581,6 +1676,195 @@ function Wait-LcHttpReady {
 }
 
 # --------------------------------------------------------------------------
+# Gateway instance identity (docs/runtime.md, "Machine interface")
+# --------------------------------------------------------------------------
+#
+# "Something answers /api/v1/info as LocalCanvas" says a LocalCanvas gateway
+# is on the port. It does not say it is the one THIS run started: another
+# LocalCanvas gateway already on that port answers exactly the same way while
+# the child we launched dies on the bind. So every gateway start.ps1 launches
+# is given a fresh instance id, the gateway echoes it in /api/v1/info, and
+# readiness -- and reuse -- require that echo.
+
+function New-LcInstanceId {
+    <#
+        128 bits from the operating system's CSPRNG, as 32 lowercase hex
+        digits. Not a GUID: a version-4 GUID spends six of its bits on its own
+        format, and the contract is 128 random bits.
+    #>
+    $bytes = New-Object byte[] 16
+    $generator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $generator.GetBytes($bytes)
+    } finally {
+        $generator.Dispose()
+    }
+    return (-join ($bytes | ForEach-Object { $_.ToString('x2') }))
+}
+
+function Get-LcGatewayAnswer {
+    <#
+        What one /api/v1/info body says about who answered.
+
+        Identity is 'localcanvas' only when Test-LcGatewayIdentity says so;
+        any other body is 'foreign' -- an answer that does not identify is not
+        a gateway (docs/connection.md). InstanceId is the echoed id, or $null
+        when the answer carries none (a gateway from before instance ids, or
+        not a gateway at all).
+    #>
+    param([AllowEmptyString()][string]$Body)
+    $identity = Test-LcGatewayIdentity -Body $Body
+    $answer = [pscustomobject]@{
+        Identity   = $(if ($identity -eq $true) { 'localcanvas' } else { 'foreign' })
+        InstanceId = $null
+    }
+    if ($identity -ne $true) { return $answer }
+    try {
+        $doc = $Body | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        return $answer
+    }
+    if ((Test-LcHasProperty -Object $doc -Name 'instance_id') -and
+        $doc.instance_id -is [string] -and $doc.instance_id) {
+        $answer.InstanceId = [string]$doc.instance_id
+    }
+    return $answer
+}
+
+function Wait-LcGatewayReady {
+    <#
+        Gateway readiness, identity-verified. Ready means ALL of:
+
+          * /api/v1/info answered 2xx;
+          * it identifies as LocalCanvas;
+          * its instance_id is the one this gateway was given ($InstanceId);
+          * the process being waited on has NOT exited.
+
+        The last is checked after each probe and before its answer is
+        trusted. An answer that arrives after our child has gone came from
+        something else, whatever it says -- and "Gateway ready" plus an
+        ownership record for a dead process is exactly the report this exists
+        to make impossible.
+
+        A LocalCanvas answer carrying another instance id is not ready and is
+        not a reason to stop waiting either: our own child may still be
+        starting, and if it has lost the port it will exit, which ends the
+        wait on the next probe. Polled like Wait-LcHttpReady; never a sleep.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Url,
+        [Parameter(Mandatory)][string]$InstanceId,
+        [Parameter(Mandatory)][System.Diagnostics.Process]$ProcessToWatch,
+        [Parameter(Mandatory)][double]$TimeoutSeconds,
+        [double]$ProbeTimeoutSeconds = 2
+    )
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $attempts = 0
+    $lastError = ''
+    $lastBody = ''
+    $exited = $false
+    while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        $attempts++
+        $probe = Invoke-LcProbe -Url $Url -TimeoutSeconds $ProbeTimeoutSeconds
+        $lastBody = $probe.Body
+        # Before the answer is trusted: is the process it should have come
+        # from still there?
+        $ProcessToWatch.Refresh()
+        if ($ProcessToWatch.HasExited) {
+            $exited = $true
+            if ($probe.Ok) {
+                $lastError = 'an answer arrived, but the gateway process had already exited, so it came from something else'
+            } else {
+                $lastError = $probe.Error
+            }
+            break
+        }
+        if ($probe.Ok) {
+            $answer = Get-LcGatewayAnswer -Body $probe.Body
+            if ($answer.Identity -ne 'localcanvas') {
+                $lastError = 'it answered, but not as a LocalCanvas gateway'
+            } elseif ($answer.InstanceId -ne $InstanceId) {
+                $said = if ($answer.InstanceId) { "instance $($answer.InstanceId)" } else { 'no instance id' }
+                $lastError = "a LocalCanvas gateway answered with $said, not $InstanceId"
+            } else {
+                $stopwatch.Stop()
+                return [pscustomobject]@{
+                    Ok             = $true
+                    ElapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
+                    Attempts       = $attempts
+                    LastError      = ''
+                    LastBody       = $probe.Body
+                    ProcessExited  = $false
+                }
+            }
+        } else {
+            $lastError = $probe.Error
+        }
+        Start-Sleep -Milliseconds $script:PollIntervalMs  # poll-interval
+    }
+    $stopwatch.Stop()
+    return [pscustomobject]@{
+        Ok             = $false
+        ElapsedSeconds = [math]::Round($stopwatch.Elapsed.TotalSeconds, 2)
+        Attempts       = $attempts
+        LastError      = $lastError
+        LastBody       = $lastBody
+        ProcessExited  = $exited
+    }
+}
+
+function Get-LcPortOccupant {
+    <#
+        Is anything on the gateway's port already? Asked BEFORE a gateway is
+        launched, because a gateway launched onto a taken port dies on the
+        bind while whatever holds the port goes on answering.
+
+        Two questions, in order: does anything answer HTTP at $ProbeUrl at
+        all (any status, or a line that is not HTTP), and if not, does the
+        port accept a TCP connection. Either one means the port is in use.
+        When the HTTP answer is a LocalCanvas gateway's, Identity says so and
+        InstanceId is the id it gave.
+
+        READ-ONLY. Nothing here looks up, names or touches the process on the
+        port -- that is not ours to find out, and never ours to stop.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$ProbeUrl,
+        [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][int]$Port,
+        [double]$TimeoutSeconds = 2
+    )
+    $result = [pscustomobject]@{ InUse = $false; Http = $false; Identity = 'none'; InstanceId = $null }
+    $probe = Invoke-LcProbe -Url $ProbeUrl -TimeoutSeconds $TimeoutSeconds
+    if ($probe.Ok -or $probe.Answered -or $probe.StatusCode -gt 0) {
+        $result.InUse = $true
+        $result.Http = $true
+        $result.Identity = 'foreign'
+        if ($probe.Ok) {
+            $answer = Get-LcGatewayAnswer -Body $probe.Body
+            $result.Identity = $answer.Identity
+            $result.InstanceId = $answer.InstanceId
+        }
+        return $result
+    }
+    $client = $null
+    try {
+        $client = [System.Net.Sockets.TcpClient]::new()
+        $name = $HostName.Trim('[', ']')
+        $connect = $client.ConnectAsync($name, $Port)
+        if ($connect.Wait([TimeSpan]::FromSeconds($TimeoutSeconds)) -and $client.Connected) {
+            $result.InUse = $true
+        }
+    } catch {
+        # Refused, unreachable: nothing is listening there, which is the
+        # answer being asked for.
+    } finally {
+        if ($client) { $client.Dispose() }
+    }
+    return $result
+}
+
+# --------------------------------------------------------------------------
 # Process ownership
 # --------------------------------------------------------------------------
 #
@@ -1683,7 +1967,12 @@ function Save-LcOwnedProcess {
         [Parameter(Mandatory)][ValidateSet('comfy', 'gateway')][string]$Role,
         [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
         [string]$Endpoint = '',
-        [string]$CommandLine = ''
+        [string]$CommandLine = '',
+        # Additive fields, written after the ones above. The gateway record
+        # carries its instance id and published endpoint here; a record
+        # without them -- one written before they existed -- still loads,
+        # because nothing in the ownership decision reads them.
+        [System.Collections.IDictionary]$Extra = $null
     )
     # Recorded from the SAME source the verification reads. An asymmetry here
     # is what turned a healthy process into an unrecognised one: the launch
@@ -1716,6 +2005,9 @@ function Save-LcOwnedProcess {
         endpoint     = $Endpoint
         owned_by     = 'localcanvas'
         written_at   = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    if ($null -ne $Extra) {
+        foreach ($key in @($Extra.Keys)) { $record[[string]$key] = $Extra[$key] }
     }
     $path = Get-LcPidFilePath -Role $Role
     Set-Content -LiteralPath $path -Value ($record | ConvertTo-Json -Depth 4) -Encoding UTF8
@@ -1757,6 +2049,20 @@ function Get-LcRecordedStartTime {
             return $parsed.ToUniversalTime()
         }
     }
+    return $null
+}
+
+function Get-LcRecordedInstanceId {
+    <#
+        The gateway instance id an ownership record carries, or $null. A
+        record written before instance ids existed has none, and that is an
+        answer -- "cannot be verified" -- rather than an error.
+    #>
+    param($Record)
+    if ($null -eq $Record) { return $null }
+    if (-not (Test-LcHasProperty -Object $Record -Name 'instance_id')) { return $null }
+    $value = $Record.instance_id
+    if ($value -is [string] -and $value) { return $value }
     return $null
 }
 
@@ -2378,17 +2684,41 @@ function Invoke-LcWorkflowCheck {
             -ElapsedMs ([int]$watch.Elapsed.TotalMilliseconds)
     }
 
-    # Every read through Test-LcHasProperty: Set-StrictMode -Version Latest is
-    # on, and which keys a document carries depends on the gateway installed in
-    # .venv, which this script does not get to assume.
-    $counts = $null
-    if (Test-LcHasProperty -Object $report -Name 'counts') { $counts = $report.counts }
-    if ($null -eq $counts) {
+    $result = Measure-LcWorkflowReport -Report $report
+    if ($null -eq $result) {
         return New-LcWorkflowCheckResult -What 'The workflow check did not say what it found' `
             -Detail @('Its report carried no counts, so the gateway and the runtime scripts are out of step.') `
             -Fix 'Run scripts\setup.ps1 to install a current gateway into .venv.' `
             -ElapsedMs ([int]$watch.Elapsed.TotalMilliseconds)
     }
+
+    # Last, so that the number handed back -- and printed -- is everything the
+    # user waited for and not the part of it that happened in another process.
+    $result.ElapsedMs = [int]$watch.Elapsed.TotalMilliseconds
+    return $result
+}
+
+function Measure-LcWorkflowReport {
+    <#
+        What one engine report means for the question in front of a sync:
+        New / Changed / Retry / Removed / Unchanged / Attention / Total and
+        Changes, as a New-LcWorkflowCheckResult with Ok=$true -- or $null
+        when the report carries no counts at all.
+
+        ONE definition of that arithmetic, and two callers: the cheap check
+        above, and `sync-workflows.ps1 -Json`, whose "changes" and "attention"
+        must be the numbers start.ps1 would have acted on, not a second
+        formula that drifts from it.
+    #>
+    param([Parameter(Mandatory)]$Report)
+    $report = $Report
+
+    # Every read through Test-LcHasProperty: Set-StrictMode -Version Latest is
+    # on, and which keys a document carries depends on the gateway installed in
+    # .venv, which this script does not get to assume.
+    $counts = $null
+    if (Test-LcHasProperty -Object $report -Name 'counts') { $counts = $report.counts }
+    if ($null -eq $counts) { return $null }
     $count = {
         param($Name)
         if (Test-LcHasProperty -Object $counts -Name $Name) { return [int]$counts.$Name }
@@ -2458,10 +2788,6 @@ function Invoke-LcWorkflowCheck {
     # change in the same sense: a sync would pick it up, and the reason it was
     # not picked up last time was the machine, not the file (T-0350).
     $result.Changes = $result.New + $result.Changed + $result.Retry
-
-    # Last, so that the number handed back -- and printed -- is everything the
-    # user waited for and not the part of it that happened in another process.
-    $result.ElapsedMs = [int]$watch.Elapsed.TotalMilliseconds
     return $result
 }
 

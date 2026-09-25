@@ -12,8 +12,11 @@ the JSON document below mirror what the gateway provides.
 
     <python> -u -m localcanvas_gateway --config <path> [--host H] [--port P]
                                        [--endpoint URL] [--no-qr] [--no-mdns]
+                                       [--instance-id ID]
         serve, and print the mDNS status. With --no-qr it prints no pairing
-        block: start.ps1 owns that.
+        block: start.ps1 owns that. /api/v1/info echoes --instance-id as
+        "instance_id" (null when none was given) and carries
+        "jobs": {"active": N}, as the gateway's own does.
 
     <python> -m localcanvas_gateway qr --endpoint <url>
         print the pairing payload and QR for an endpoint, and exit.
@@ -40,6 +43,18 @@ paths without a second stub:
                                     not JSON at all
                              empty-object = answer it 200 with {}, which names
                                     no service
+    LC_STUB_GATEWAY_INSTANCE_ID
+                             answer /api/v1/info with THIS instance id instead
+                             of the one --instance-id gave: a LocalCanvas
+                             gateway that is not the one that was started
+    LC_STUB_GATEWAY_JOBS_ACTIVE
+                             the "jobs.active" count to report (default: 0)
+    LC_STUB_GATEWAY_HANDOFF  1 = hand the port to a copy of this process and
+                             exit: the copy binds the port, this process exits
+                             about a second later, and the copy answers --
+                             with the same instance id -- only after this
+                             process has gone. So every answer on the port
+                             arrives after the process that was started exited.
     LC_STUB_CONFIG_MODE      ok | crash | garbage | absent   (default: ok)
     LC_STUB_CONFIG_DROP      remove this dotted field from the document
     LC_STUB_QR_MODE          ok | fail                       (default: ok)
@@ -492,6 +507,8 @@ def _qr_command(argv):
 
 class Handler(BaseHTTPRequestHandler):
     alien = ""
+    instance_id = None
+    jobs_active = 0
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's spelling
         path = self.path.split("?", 1)[0]
@@ -517,6 +534,8 @@ class Handler(BaseHTTPRequestHandler):
                     "display_name": DISPLAY_NAME,
                     "comfy": {"status": "ready", "detail": None},
                     "capabilities": {"cancel": True, "media_upload": True, "events": True},
+                    "instance_id": Handler.instance_id,
+                    "jobs": {"active": Handler.jobs_active},
                 }
             body = json.dumps(doc).encode("utf-8")
             self.send_response(200)
@@ -529,7 +548,17 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
-class _IPv6Server(ThreadingHTTPServer):
+class _Server(ThreadingHTTPServer):
+    # The real gateway is served by uvicorn through asyncio, which does NOT set
+    # SO_REUSEADDR on Windows -- so a second gateway on a taken port fails its
+    # bind and exits. socketserver sets it by default, and on Windows that
+    # option lets a second socket bind a port another one is listening on.
+    # Left at the default, this stub would share a port the gateway could not,
+    # and a test about a taken port would be about something else.
+    allow_reuse_address = os.name != "nt"
+
+
+class _IPv6Server(_Server):
     address_family = socket.AF_INET6
 
     def server_bind(self):
@@ -553,7 +582,7 @@ def _servers(host, port):
     except ValueError:
         pass
     else:
-        return [ThreadingHTTPServer((host, port), Handler)]
+        return [_Server((host, port), Handler)]
     servers = []
     seen = set()
     for family, _type, _proto, _name, address in socket.getaddrinfo(
@@ -564,8 +593,35 @@ def _servers(host, port):
         if family == socket.AF_INET6:
             servers.append(_IPv6Server((address[0], port), Handler))
         elif family == socket.AF_INET:
-            servers.append(ThreadingHTTPServer((address[0], port), Handler))
+            servers.append(_Server((address[0], port), Handler))
     return servers
+
+
+def _hand_off(argv):
+    """LC_STUB_GATEWAY_HANDOFF: start the heir, wait until it holds the port, exit.
+
+    The heir is this module again, with the same arguments, and its standard
+    input is a pipe from this process -- which is how it learns that this
+    process has gone: the pipe reaches end-of-file when this process exits.
+    """
+    import subprocess
+
+    env = dict(os.environ)
+    env.pop("LC_STUB_GATEWAY_HANDOFF", None)
+    env["LC_STUB_GATEWAY_HEIR"] = "1"
+    heir = subprocess.Popen(
+        [sys.executable, "-u", "-m", "localcanvas_gateway"] + list(argv),
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=env)
+    while True:
+        said = heir.stdout.readline()
+        if not said or said.strip() == b"listening":
+            break
+    print(f"[INFO] handed the port to PID {heir.pid}", flush=True)
+    # Alive a little longer, so the caller's probes meet a port that is held
+    # while this process still runs -- and are answered only after it is gone.
+    time.sleep(1.0)
+    return EXIT_OK
 
 
 def _serve_command(argv):
@@ -576,6 +632,7 @@ def _serve_command(argv):
     parser.add_argument("--endpoint", default=None)
     parser.add_argument("--no-mdns", action="store_true")
     parser.add_argument("--no-qr", action="store_true")
+    parser.add_argument("--instance-id", default=None)
     args = parser.parse_args(argv)
 
     marker = os.environ.get("LC_STUB_GATEWAY_MARKER")
@@ -590,6 +647,10 @@ def _serve_command(argv):
     if not os.path.isfile(args.config):
         print(f"config not found: {args.config}", file=sys.stderr, flush=True)
         return EXIT_CONFIG
+
+    if os.environ.get("LC_STUB_GATEWAY_HANDOFF") == "1":
+        return _hand_off(argv)
+    heir = os.environ.get("LC_STUB_GATEWAY_HEIR") == "1"
 
     # The gateway is redirected by start.ps1 exactly as ComfyUI is, so it has
     # exactly the same exposure (T-0085). ASCII only, so the report itself
@@ -634,11 +695,23 @@ def _serve_command(argv):
             time.sleep(3600)
 
     Handler.alien = os.environ.get("LC_STUB_GATEWAY_ALIEN", "")
+    Handler.instance_id = os.environ.get("LC_STUB_GATEWAY_INSTANCE_ID") or args.instance_id
+    Handler.jobs_active = int(os.environ.get("LC_STUB_GATEWAY_JOBS_ACTIVE") or 0)
     bind_host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "*") else args.host
-    for server in _servers(bind_host, args.port):
+    # Constructing a server binds and listens; serving is what answers.
+    servers = _servers(bind_host, args.port)
+    if heir:
+        # Holding the port now. Say so to the process that started this one,
+        # then answer nothing until it has exited, and a moment longer.
+        sys.stdout.write("listening\n")
+        sys.stdout.flush()
+        sys.stdin.buffer.read()
+        time.sleep(0.5)
+    for server in servers:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        print(f"[INFO] Listening on {server.server_address[0]}:{args.port}", flush=True)
+        if not heir:
+            print(f"[INFO] Listening on {server.server_address[0]}:{args.port}", flush=True)
     try:
         while True:
             time.sleep(3600)
