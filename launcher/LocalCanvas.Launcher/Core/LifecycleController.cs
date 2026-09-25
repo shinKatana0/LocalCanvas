@@ -17,6 +17,9 @@ public sealed class LifecycleOptions
     public Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = static (span, token) => Task.Delay(span, token);
 
     public Func<string, bool> FileExists { get; init; } = File.Exists;
+
+    /// <summary>Applied to every script call before it is run. Replaced only by tests, to shorten timeouts.</summary>
+    public Func<ScriptCall, ScriptCall> CallPolicy { get; init; } = static call => call;
 }
 
 /// <summary>
@@ -63,6 +66,7 @@ public sealed class LifecycleController : IAsyncDisposable
     private volatile bool _sessionEnding;
     private volatile bool _exited;
     private TimeSpan _sessionBound = TimeSpan.FromSeconds(25);
+    private DateTime _sessionDeadline = DateTime.MaxValue;
 
     // Everything below is read and written by the queue's consumer only.
     private LauncherState _state = LauncherState.Starting;
@@ -81,6 +85,11 @@ public sealed class LifecycleController : IAsyncDisposable
     private int _consecutiveFailures;
     private string? _problem;
     private StartupTimeouts _timeouts = StartupTimeouts.Fallback;
+
+    // A script call the launcher stopped waiting for while its PowerShell was
+    // still running. Nothing is stopped beside it until it has exited.
+    private ScriptOutcome? _abandoned;
+    private bool _anyCallAbandoned;
 
     private volatile TrayViewModel _viewModel;
 
@@ -189,6 +198,7 @@ public sealed class LifecycleController : IAsyncDisposable
     {
         _log.Write($"session: Windows is ending the session; stopping LocalCanvas (bound {bound.TotalSeconds:0} s)");
         _sessionBound = bound;
+        _sessionDeadline = DateTime.UtcNow + bound;
         _sessionEnding = true;
         try
         {
@@ -202,14 +212,21 @@ public sealed class LifecycleController : IAsyncDisposable
             _ = Enqueue("session-end", () => RunExitAsync(ExitMode.SessionEnd));
         }
         var finished = _exitCompleted.Task.Wait(bound);
-        _log.Write(finished ? "session: stopped" : "session: the stop did not finish within the bound");
+        _log.Write(finished
+            ? "session: the exit sequence finished within the bound"
+            : "session: the exit sequence did not finish within the bound; what it has not confirmed is not known");
         return finished;
     }
 
     /// <summary>One health probe now, through the queue. The monitor calls this every interval.</summary>
+    /// <remarks>
+    /// The probe is made INSIDE the queue item that applies it. A probe made
+    /// outside and applied later could land after a restart or an exit and
+    /// report an instance that is no longer the one expected.
+    /// </remarks>
     internal Task<bool> TickHealthAsync() => Enqueue("health", async () =>
     {
-        await RunHealthTickAsync().ConfigureAwait(false);
+        await ApplyHealthAsync(await ReadHealthAsync().ConfigureAwait(false)).ConfigureAwait(false);
         return true;
     });
 
@@ -346,8 +363,15 @@ public sealed class LifecycleController : IAsyncDisposable
             {
                 await TickHealthAsync().ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is OperationCanceledException or InvalidOperationException)
+            catch (OperationCanceledException) when (token.IsCancellationRequested || _exited)
             {
+            }
+            catch (Exception exception)
+            {
+                // Whatever went wrong in one tick, the monitor goes on: a
+                // monitor that died silently would leave the tray showing its
+                // last state for ever.
+                _log.Write($"health: a probe failed unexpectedly and the monitor continues: {exception.GetType().Name}: {exception.Message}");
             }
             finally
             {
@@ -560,7 +584,7 @@ public sealed class LifecycleController : IAsyncDisposable
         {
             // Not fatal: the Gateway starts on the catalogue already in place,
             // as start.ps1 does, and the tray says the check did not complete.
-            _workflowProblem = "The workflow check did not complete. " + check.DescribeFailure();
+            _workflowProblem = "The workflow check did not complete. " + DescribeUnfinished(check);
             _log.Write("workflows: " + _workflowProblem);
             return;
         }
@@ -609,7 +633,7 @@ public sealed class LifecycleController : IAsyncDisposable
         }
         if (!sync.HasDocument)
         {
-            _workflowProblem = LauncherText.SyncDidNotComplete + " " + sync.DescribeFailure();
+            _workflowProblem = LauncherText.SyncDidNotComplete + " " + DescribeUnfinished(sync);
             _log.Write("sync: " + _workflowProblem);
             return null;
         }
@@ -743,11 +767,16 @@ public sealed class LifecycleController : IAsyncDisposable
         }
     }
 
-    private async Task RunHealthTickAsync()
+    private sealed record HealthReading(GatewayHealth Gateway, bool? ComfyUp);
+
+    private bool Monitorable => !_exited && _state is LauncherState.Ready or LauncherState.Attention or LauncherState.GatewayDown;
+
+    /// <summary>Probe the Gateway (for the instance expected now) and ComfyUI. Null when nothing is monitored.</summary>
+    private async Task<HealthReading?> ReadHealthAsync()
     {
-        if (_exited || _state is not (LauncherState.Ready or LauncherState.Attention or LauncherState.GatewayDown))
+        if (!Monitorable)
         {
-            return;
+            return null;
         }
         var token = _lifetime.Token;
         var gatewayProbe = _infoUrl is not null && _expectedInstance is not null
@@ -755,10 +784,18 @@ public sealed class LifecycleController : IAsyncDisposable
             : Task.FromResult(GatewayHealth.NotReady("No Gateway instance is expected: it was not restarted."));
         var comfyProbe = _comfyUrl is not null ? _health.ProbeComfyAsync(_comfyUrl, token) : Task.FromResult(false);
         await Task.WhenAll(gatewayProbe, comfyProbe).ConfigureAwait(false);
+        return new HealthReading(await gatewayProbe.ConfigureAwait(false),
+            _comfyUrl is null ? null : await comfyProbe.ConfigureAwait(false));
+    }
 
-        if (_comfyUrl is not null)
+    private async Task ApplyHealthAsync(HealthReading? reading)
+    {
+        if (reading is null || !Monitorable)
         {
-            var up = await comfyProbe.ConfigureAwait(false);
+            return;
+        }
+        if (reading.ComfyUp is bool up)
+        {
             if (_comfyUp != up)
             {
                 _log.Write($"health: ComfyUI {(up ? "answers" : "does not answer")} at {_comfyUrl}");
@@ -766,7 +803,7 @@ public sealed class LifecycleController : IAsyncDisposable
             _comfyUp = up;
         }
 
-        var gateway = await gatewayProbe.ConfigureAwait(false);
+        var gateway = reading.Gateway;
         if (gateway.Ready)
         {
             _consecutiveFailures = 0;
@@ -859,7 +896,7 @@ public sealed class LifecycleController : IAsyncDisposable
         string? details = null;
         if (!stop.HasDocument)
         {
-            why = stop.DescribeFailure();
+            why = DescribeUnfinished(stop);
             details = stop.StandardErrorTail();
         }
         else
@@ -996,59 +1033,194 @@ public sealed class LifecycleController : IAsyncDisposable
         _gatewayHealthy = false;
         Publish();
         _log.Write($"exit: stopping what LocalCanvas started ({mode})");
-        var timeout = mode == ExitMode.SessionEnd ? _sessionBound : LauncherCalls.StopAllTimeout;
-        // Not cancelled by the session ending: this is the work the session end is for.
-        var stop = await _scripts.RunAsync(LauncherCalls.StopAll(timeout), CancellationToken.None).ConfigureAwait(false);
-        var leftovers = DescribeStop(stop);
-        if (leftovers is not null)
+
+        // A session end, or any call this run stopped waiting for, is
+        // confirmed afterwards by status.ps1: a stop that ran after such a
+        // call is not by itself proof that nothing is left.
+        var confirm = mode == ExitMode.SessionEnd || _anyCallAbandoned;
+        var problems = new List<string>();
+        var stopProblems = new List<string>();
+        string? details = null;
+
+        if (await WaitForAbandonedAsync(mode).ConfigureAwait(false))
         {
-            _log.Write("exit: " + leftovers.Text + (leftovers.Details is null ? string.Empty : "\n" + leftovers.Details));
+            var timeout = mode == ExitMode.SessionEnd ? Positive(SessionRemaining) : LauncherCalls.StopAllTimeout;
+            // Not cancelled by the session ending: this is the work the session end is for.
+            var stop = await _scripts.RunAsync(LauncherCalls.StopAll(timeout), CancellationToken.None).ConfigureAwait(false);
+            stopProblems.AddRange(StopProblems(stop));
+            details = stop.HasDocument ? StopDocument.Read(stop.Document!.Value).Envelope.Error?.Detail : stop.StandardErrorTail();
+            foreach (var problem in stopProblems)
+            {
+                _log.Write("exit: stop.ps1: " + problem);
+            }
+            confirm |= stopProblems.Count > 0;
+        }
+        else
+        {
+            var still = _abandoned!;
+            problems.Add($"{still.Call.Script}{Pid(still.ProcessId)} was still running, so stop.ps1 was not run beside it; what it starts is not stopped.");
+            confirm = true;
+        }
+
+        if (confirm)
+        {
+            var (confirmed, leftovers, why) = await ConfirmWithStatusAsync(mode).ConfigureAwait(false);
+            // What stop.ps1 said is kept unless status.ps1 finds everything gone.
+            if (!confirmed || leftovers.Count > 0)
+            {
+                problems.AddRange(stopProblems);
+            }
+            problems.AddRange(leftovers);
+            if (!confirmed)
+            {
+                problems.Add($"What is still running could not be confirmed: {why}");
+            }
+            if (confirmed && problems.Count == 0)
+            {
+                _log.Write("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)");
+            }
+        }
+        else
+        {
+            problems.AddRange(stopProblems);
+            if (problems.Count == 0)
+            {
+                _log.Write("exit: everything LocalCanvas started has stopped");
+            }
+        }
+
+        if (problems.Count > 0)
+        {
+            var message = new LauncherMessage(MessageKind.StopIncomplete, LauncherText.StopIncomplete, string.Join(" ", problems),
+                JoinDetails(details, "Run scripts\\status.ps1 to see what is still running, and scripts\\stop.ps1 to stop it.", "Log: " + _log.Location));
+            _log.Write("exit: NOT everything was stopped or confirmed stopped: " + message.Text);
             if (mode != ExitMode.SessionEnd && !_sessionEnding)
             {
                 try
                 {
-                    await _prompts.ShowMessageAsync(leftovers, SessionToken).ConfigureAwait(false);
+                    await _prompts.ShowMessageAsync(message, SessionToken).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
                 }
             }
         }
-        else
-        {
-            _log.Write("exit: everything LocalCanvas started has stopped");
-        }
         FinishExit();
         return true;
     }
 
-    private LauncherMessage? DescribeStop(ScriptOutcome stop)
+    private TimeSpan SessionRemaining => _sessionDeadline - DateTime.UtcNow;
+
+    private static TimeSpan Positive(TimeSpan span) => span > TimeSpan.FromSeconds(1) ? span : TimeSpan.FromSeconds(1);
+
+    private static string Pid(int? pid) => pid is int found ? $" (PID {found.ToString(CultureInfo.InvariantCulture)})" : string.Empty;
+
+    /// <summary>
+    /// Whether stop.ps1 may run: never while a script call this run stopped
+    /// waiting for is still running, because a start still in progress would
+    /// start what the stop had just found absent. At a session end the wait is
+    /// bounded by the session budget, keeping time for the stop and its
+    /// confirmation; otherwise the call's own grace has already been waited.
+    /// </summary>
+    private async Task<bool> WaitForAbandonedAsync(ExitMode mode)
     {
+        if (_abandoned is not { } still || !still.IsStillRunning)
+        {
+            return true;
+        }
+        var wait = TimeSpan.Zero;
+        if (mode == ExitMode.SessionEnd)
+        {
+            var reserve = TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(10).Ticks, _sessionBound.Ticks / 2));
+            wait = SessionRemaining - reserve;
+        }
+        if (wait > TimeSpan.Zero)
+        {
+            _log.Write($"exit: waiting up to {wait.TotalSeconds:0.#} s for {still.Call.Script}{Pid(still.ProcessId)} to finish before anything is stopped");
+            try
+            {
+                await still.StillRunning!.WaitAsync(wait).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+        }
+        if (still.IsStillRunning)
+        {
+            _log.Write($"exit: {still.Call.Script}{Pid(still.ProcessId)} is still running; stop.ps1 is not run beside it");
+            return false;
+        }
+        _log.Write($"exit: {still.Call.Script}{Pid(still.ProcessId)} has finished");
+        return true;
+    }
+
+    /// <summary>status.ps1 after a stop: what is still running, from the scripts' own records and probes.</summary>
+    private async Task<(bool Confirmed, List<string> Leftovers, string? Why)> ConfirmWithStatusAsync(ExitMode mode)
+    {
+        var leftovers = new List<string>();
+        var timeout = mode == ExitMode.SessionEnd ? SessionRemaining : LauncherCalls.StatusTimeout;
+        if (timeout < TimeSpan.FromSeconds(1))
+        {
+            return (false, leftovers, "no time was left in the session to run status.ps1.");
+        }
+        _log.Write("exit: confirming with status.ps1");
+        var status = await _scripts.RunAsync(LauncherCalls.Status(timeout), CancellationToken.None).ConfigureAwait(false);
+        if (!status.HasDocument)
+        {
+            return (false, leftovers, status.DescribeFailure());
+        }
+        var document = StatusDocument.Read(status.Document!.Value);
+        if (!document.Envelope.Ok || !document.ConfigOk)
+        {
+            return (false, leftovers, Sentence(document.Envelope.Error?.What ?? "status.ps1 did not report"));
+        }
+        var gateway = document.Gateway;
+        if (gateway.Ownership is "running" or "unproven")
+        {
+            leftovers.Add($"The Gateway{Pid(gateway.Pid)} is still running" +
+                          (gateway.Reachable == true && gateway.InstanceId is { } id ? $" and answers as instance {id}." : "."));
+        }
+        else if (gateway.Reachable == true && gateway.Identity == "localcanvas")
+        {
+            leftovers.Add($"A LocalCanvas Gateway still answers at {gateway.ProbeUrl} (instance {gateway.InstanceId ?? "unknown"}).");
+        }
+        if (document.Comfy.Ownership is "running" or "unproven")
+        {
+            leftovers.Add("A ComfyUI that LocalCanvas started is still running.");
+        }
+        foreach (var leftover in leftovers)
+        {
+            _log.Write("exit: status.ps1: " + leftover);
+        }
+        return (true, leftovers, null);
+    }
+
+    /// <summary>What a stop result does not positively account for. Empty only when both roles are accounted for.</summary>
+    private static List<string> StopProblems(ScriptOutcome stop)
+    {
+        var problems = new List<string>();
         if (!stop.HasDocument)
         {
-            return new LauncherMessage(MessageKind.StopIncomplete, LauncherText.StopIncomplete, stop.DescribeFailure(),
-                JoinDetails(stop.StandardErrorTail(), "Run scripts\\status.ps1 to see what is still running.", "Log: " + _log.Location));
+            problems.Add(DescribeUnfinished(stop));
+            return problems;
         }
         var document = StopDocument.Read(stop.Document!.Value);
-        var problems = new List<string>();
         if (!document.Envelope.Ok)
         {
             problems.Add(Sentence(document.Envelope.Error?.What ?? "stop.ps1 did not complete"));
         }
-        if (document.Gateway.LeftRunning)
+        foreach (var (what, role) in new[] { ("The Gateway", document.Gateway), ("ComfyUI", document.Comfy) })
         {
-            problems.Add(DescribeLeftRunning("The Gateway", document.Gateway));
+            if (role.LeftRunning)
+            {
+                problems.Add(DescribeLeftRunning(what, role));
+            }
+            else if (!role.NothingLeftRunning)
+            {
+                problems.Add($"stop.ps1 did not report what became of {(what == "ComfyUI" ? what : "the Gateway")}.");
+            }
         }
-        if (document.Comfy.LeftRunning)
-        {
-            problems.Add(DescribeLeftRunning("ComfyUI", document.Comfy));
-        }
-        if (problems.Count == 0)
-        {
-            return null;
-        }
-        return new LauncherMessage(MessageKind.StopIncomplete, LauncherText.StopIncomplete, string.Join(" ", problems),
-            JoinDetails(document.Envelope.Error?.Detail, "Run scripts\\status.ps1 to see what is still running.", "Log: " + _log.Location));
+        return problems;
     }
 
     private static string DescribeLeftRunning(string what, StopRole role)
@@ -1097,7 +1269,63 @@ public sealed class LifecycleController : IAsyncDisposable
     // Helpers
     // ------------------------------------------------------------------
 
-    private Task<ScriptOutcome> RunAsync(ScriptCall call) => _scripts.RunAsync(call, SessionToken);
+    /// <summary>
+    /// Every script call of a command. One that passes its timeout is waited
+    /// for a while longer (its grace): the scripts end themselves on their own
+    /// timeouts, and nothing else is run until the call has ended. One still
+    /// running after that is remembered, and no further call is made beside it.
+    /// </summary>
+    private async Task<ScriptOutcome> RunAsync(ScriptCall call)
+    {
+        call = _options.CallPolicy(call);
+        if (_abandoned is { IsStillRunning: true } still)
+        {
+            _log.Write($"script: {call.Script} not run: {still.Call.Script}{Pid(still.ProcessId)} is still running");
+            return new ScriptOutcome(call, ScriptFailure.NotStarted, null, null, string.Empty, TimeSpan.Zero,
+                $"{still.Call.Script}{Pid(still.ProcessId)} from an earlier step is still running, and nothing is run beside it.");
+        }
+        var outcome = await _scripts.RunAsync(call, SessionToken).ConfigureAwait(false);
+        if (outcome.Failure is ScriptFailure.TimedOut or ScriptFailure.Cancelled)
+        {
+            _anyCallAbandoned = true;
+        }
+        if (outcome.Failure == ScriptFailure.TimedOut && outcome.IsStillRunning && call.Grace > TimeSpan.Zero && !_sessionEnding)
+        {
+            _log.Write($"script: {call.Script}{Pid(outcome.ProcessId)} did not finish within {call.Timeout.TotalSeconds:0} s; " +
+                       $"waiting up to {call.Grace.TotalSeconds:0} s more for it to end before anything else is run");
+            try
+            {
+                await outcome.StillRunning!.WaitAsync(call.Grace, SessionToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            _log.Write(outcome.IsStillRunning
+                ? $"script: {call.Script}{Pid(outcome.ProcessId)} is still running; nothing will be run beside it"
+                : $"script: {call.Script}{Pid(outcome.ProcessId)} has ended");
+        }
+        if (outcome.IsStillRunning)
+        {
+            _abandoned = outcome;
+        }
+        return outcome;
+    }
+
+    /// <summary>A call that did not produce a document, in words that say whether it is still running.</summary>
+    private static string DescribeUnfinished(ScriptOutcome outcome)
+    {
+        var text = outcome.DescribeFailure();
+        if (outcome.Failure is ScriptFailure.TimedOut or ScriptFailure.Cancelled)
+        {
+            text += outcome.IsStillRunning
+                ? $" It is still running{Pid(outcome.ProcessId)}. LocalCanvas does not end it, and stops nothing beside it."
+                : " It has ended since.";
+        }
+        return text;
+    }
 
     private async Task TellAsync(LauncherMessage message)
     {
@@ -1144,7 +1372,7 @@ public sealed class LifecycleController : IAsyncDisposable
                 $"{outcome.Call.Script} ended with exit code {envelope.ExitCode?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}.",
                 outcome.StandardErrorTail(), null, _log.Location);
         }
-        return new FailureReport(LauncherText.CouldNotStart, outcome.DescribeFailure(), outcome.StandardErrorTail(), null, _log.Location);
+        return new FailureReport(LauncherText.CouldNotStart, DescribeUnfinished(outcome), outcome.StandardErrorTail(), null, _log.Location);
     }
 
     private static string Sentence(string text)

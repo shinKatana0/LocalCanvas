@@ -19,21 +19,27 @@ public static class LauncherCalls
     /// <summary>Beyond twice the configured Gateway timeout (a reuse check, then a launch).</summary>
     public static readonly TimeSpan GatewayMargin = TimeSpan.FromSeconds(60);
 
-    public static ScriptCall Status() => new("status.ps1", [], StatusTimeout);
+    /// <summary>How much longer a call that is not a start is waited for after its timeout.</summary>
+    public static readonly TimeSpan DefaultGrace = TimeSpan.FromSeconds(60);
+
+    public static ScriptCall Status() => new("status.ps1", [], StatusTimeout, DefaultGrace);
+
+    /// <summary>status.ps1 with a timeout of its own: the confirmation after a stop.</summary>
+    public static ScriptCall Status(TimeSpan timeout) => new("status.ps1", [], timeout, TimeSpan.Zero);
 
     public static ScriptCall StartComfy(StartupTimeouts timeouts) =>
-        new("start.ps1", ["-Component", "Comfy"], timeouts.Comfy + ComfyMargin);
+        new("start.ps1", ["-Component", "Comfy"], timeouts.Comfy + ComfyMargin, timeouts.Comfy);
 
     /// <summary>The cheap check: converts nothing, writes nothing, asks ComfyUI nothing.</summary>
-    public static ScriptCall WorkflowCheck() => new("sync-workflows.ps1", ["-DryRun", "-NoConvert"], WorkflowCheckTimeout);
+    public static ScriptCall WorkflowCheck() => new("sync-workflows.ps1", ["-DryRun", "-NoConvert"], WorkflowCheckTimeout, DefaultGrace);
 
-    public static ScriptCall WorkflowSync() => new("sync-workflows.ps1", [], WorkflowSyncTimeout);
+    public static ScriptCall WorkflowSync() => new("sync-workflows.ps1", [], WorkflowSyncTimeout, TimeSpan.FromMinutes(5));
 
     public static ScriptCall StartGateway(StartupTimeouts timeouts) =>
-        new("start.ps1", ["-Component", "Gateway"], timeouts.Gateway + timeouts.Gateway + GatewayMargin);
+        new("start.ps1", ["-Component", "Gateway"], timeouts.Gateway + timeouts.Gateway + GatewayMargin, timeouts.Gateway);
 
-    public static ScriptCall StopGateway() => new("stop.ps1", ["-Component", "Gateway"], StopGatewayTimeout);
+    public static ScriptCall StopGateway() => new("stop.ps1", ["-Component", "Gateway"], StopGatewayTimeout, DefaultGrace);
 
     /// <summary>Both roles: the owned Gateway, then an owned ComfyUI. A reused or external ComfyUI is left alone by the script.</summary>
-    public static ScriptCall StopAll(TimeSpan timeout) => new("stop.ps1", [], timeout);
+    public static ScriptCall StopAll(TimeSpan timeout) => new("stop.ps1", [], timeout, TimeSpan.Zero);
 }

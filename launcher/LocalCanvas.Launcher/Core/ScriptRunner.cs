@@ -5,8 +5,13 @@ using System.Text.Json;
 namespace LocalCanvas.Launcher.Core;
 
 /// <summary>One call of a LocalCanvas script: <c>scripts\&lt;Script&gt;</c> with its arguments.</summary>
-/// <remarks><c>-Json</c> is always added by the runner and never by a caller.</remarks>
-public sealed record ScriptCall(string Script, IReadOnlyList<string> Arguments, TimeSpan Timeout)
+/// <remarks>
+/// <c>-Json</c> is always added by the runner and never by a caller.
+/// <see cref="Grace"/> is how much longer the launcher waits for the process
+/// to exit once <see cref="Timeout"/> has passed, before anything else is run
+/// (the scripts enforce their own timeouts, and the launcher never ends one).
+/// </remarks>
+public sealed record ScriptCall(string Script, IReadOnlyList<string> Arguments, TimeSpan Timeout, TimeSpan Grace = default)
 {
     public string Describe() =>
         Arguments.Count == 0 ? $"{Script} -Json" : $"{Script} {string.Join(' ', Arguments)} -Json";
@@ -46,8 +51,13 @@ public sealed record ScriptOutcome(
     JsonElement? Document,
     string StandardError,
     TimeSpan Duration,
-    string? FailureDetail)
+    string? FailureDetail,
+    int? ProcessId = null,
+    Task? StillRunning = null)
 {
+    /// <summary>The PowerShell process of a call that was not waited out; null when it has exited.</summary>
+    public bool IsStillRunning => StillRunning is { IsCompleted: false };
+
     public bool HasDocument => Failure == ScriptFailure.None && Document.HasValue;
 
     /// <summary>A sentence for a user about a call that produced no document.</summary>
@@ -57,7 +67,7 @@ public sealed record ScriptOutcome(
         return Failure switch
         {
             ScriptFailure.NotStarted => $"PowerShell could not run {Call.Script}.{detail}",
-            ScriptFailure.TimedOut => $"{Call.Script} did not finish within {Call.Timeout.TotalSeconds:0} seconds. It was left running.",
+            ScriptFailure.TimedOut => $"{Call.Script} did not finish within {Call.Timeout.TotalSeconds:0} seconds.",
             ScriptFailure.Cancelled => $"{Call.Script} was still running when LocalCanvas stopped waiting for it.",
             ScriptFailure.NoDocument => $"{Call.Script} ended (exit code {ExitCode?.ToString(CultureInfo.InvariantCulture) ?? "unknown"}) without reporting a result.{detail}",
             _ => string.Empty,
@@ -164,12 +174,14 @@ public sealed class PwshScriptRunner : IScriptRunner
         }
         if (result.Cancelled)
         {
-            return new ScriptOutcome(call, ScriptFailure.Cancelled, null, null, result.StandardError, result.Duration, null);
+            return new ScriptOutcome(call, ScriptFailure.Cancelled, null, null, result.StandardError, result.Duration, null,
+                result.ProcessId, result.StillRunning);
         }
         if (result.TimedOut)
         {
             return new ScriptOutcome(call, ScriptFailure.TimedOut, null, null, result.StandardError, result.Duration,
-                result.ProcessId is int pid ? $"PID {pid.ToString(CultureInfo.InvariantCulture)}" : null);
+                result.ProcessId is int pid ? $"PID {pid.ToString(CultureInfo.InvariantCulture)}" : null,
+                result.ProcessId, result.StillRunning);
         }
 
         var text = result.StandardOutput.Trim();

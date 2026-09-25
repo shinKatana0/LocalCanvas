@@ -31,7 +31,7 @@ public sealed partial class ScriptRunnerTests : IDisposable
         Write("array.ps1", "param([switch]$Json)\nWrite-Output '[1,2]'\nexit 0\n");
         Write("silent.ps1", "param([switch]$Json)\nexit 0\n");
         Write("crash.ps1", "param([switch]$Json)\n$ErrorActionPreference = 'Stop'\nthrow 'boom'\n");
-        Write("slow.ps1", "param([switch]$Json)\nStart-Sleep -Seconds 120\n");
+        Write("slow.ps1", "param([switch]$Json)\nStart-Sleep -Seconds 8\n");
     }
 
     private void Write(string name, string text) => File.WriteAllText(Path.Combine(_root, "scripts", name), text);
@@ -111,31 +111,17 @@ public sealed partial class ScriptRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task A_script_past_its_timeout_is_a_failure_and_is_left_running()
+    public async Task A_script_past_its_timeout_is_a_failure_is_left_running_and_can_be_waited_out()
     {
-        var outcome = await Runner().RunAsync(new ScriptCall("slow.ps1", [], TimeSpan.FromSeconds(3)));
+        var outcome = await Runner().RunAsync(new ScriptCall("slow.ps1", [], TimeSpan.FromSeconds(2)));
         Assert.Equal(ScriptFailure.TimedOut, outcome.Failure);
-        var pid = int.Parse(PidOf().Match(outcome.FailureDetail ?? string.Empty).Groups[1].Value, CultureInfo.InvariantCulture);
-        try
-        {
-            // The launcher never ends a process: the one it timed out on is still there.
-            using var survivor = Process.GetProcessById(pid);
-            Assert.False(survivor.HasExited);
-            Assert.Contains(_log.Lines, line => line.Contains($"PID {pid} left running", StringComparison.Ordinal));
-        }
-        finally
-        {
-            // This test's own pwsh, stopped by the exact PID it was started with.
-            try
-            {
-                using var own = Process.GetProcessById(pid);
-                own.Kill();
-                own.WaitForExit(10_000);
-            }
-            catch (ArgumentException)
-            {
-            }
-        }
+        Assert.NotNull(outcome.ProcessId);
+        // The launcher never ends a process: the one it timed out on is still there...
+        Assert.True(outcome.IsStillRunning);
+        Assert.Contains(_log.Lines, line => line.Contains($"PID {outcome.ProcessId} left running", StringComparison.Ordinal));
+        // ...and ends by itself; the task handed back says when.
+        await outcome.StillRunning!.WaitAsync(TimeSpan.FromSeconds(60));
+        Assert.False(outcome.IsStillRunning);
     }
 
     public void Dispose() => TestEnvironment.RemoveDirectory(_root);
@@ -143,6 +129,4 @@ public sealed partial class ScriptRunnerTests : IDisposable
     [GeneratedRegex(@"^script: echo\.ps1 exit 0 in \d+ ms \(document\)$")]
     private static partial Regex ExitLine();
 
-    [GeneratedRegex(@"PID (\d+)")]
-    private static partial Regex PidOf();
 }

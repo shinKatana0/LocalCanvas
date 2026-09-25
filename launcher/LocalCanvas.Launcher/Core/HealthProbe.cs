@@ -181,11 +181,11 @@ public sealed class HttpHealthProbe : IHealthProbe, IDisposable
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return new Answer(0, [], $"{url} did not answer within {ProbeTimeout.TotalSeconds:0} seconds.");
+            return new Answer(0, [], $"{url} is not answering (no answer within {ProbeTimeout.TotalSeconds:0} seconds).");
         }
         catch (HttpRequestException exception)
         {
-            return new Answer(0, [], $"{url} could not be reached ({exception.HttpRequestError}).");
+            return new Answer(0, [], $"{url} is not answering ({exception.HttpRequestError}).");
         }
         catch (IOException exception)
         {

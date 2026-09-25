@@ -104,10 +104,31 @@ public sealed record StopDocument(ScriptEnvelope Envelope, string? Component, St
     }
 }
 
-public sealed record StatusDocument(ScriptEnvelope Envelope, bool ConfigOk)
+public sealed record StatusGateway(bool? Reachable, string? Identity, string? InstanceId, string? Ownership, int? Pid, string? ProbeUrl);
+
+public sealed record StatusComfy(bool? Healthy, string? Ownership, string? Url);
+
+public sealed record StatusDocument(ScriptEnvelope Envelope, bool ConfigOk, StatusGateway Gateway, StatusComfy Comfy)
 {
-    public static StatusDocument Read(JsonElement document) =>
-        new(ScriptEnvelope.Read(document), Json.Bool(document, "config_ok") ?? false);
+    public static StatusDocument Read(JsonElement document)
+    {
+        var gateway = Json.Object(document, "gateway");
+        var comfy = Json.Object(document, "comfy");
+        return new StatusDocument(
+            ScriptEnvelope.Read(document),
+            Json.Bool(document, "config_ok") ?? false,
+            new StatusGateway(
+                Json.Bool(gateway, "reachable"),
+                Json.String(gateway, "identity"),
+                Json.String(gateway, "instance_id"),
+                Json.String(gateway, "ownership"),
+                Json.Int(gateway, "pid"),
+                Json.String(gateway, "probe_url")),
+            new StatusComfy(
+                Json.Bool(comfy, "healthy"),
+                Json.String(comfy, "ownership"),
+                Json.String(comfy, "url")));
+    }
 }
 
 public sealed record SyncAttentionItem(string? Id, string? State, string? Reason);

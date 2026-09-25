@@ -46,6 +46,27 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
     /// <summary>Awaited before each call is answered.</summary>
     public Func<ScriptCall, CancellationToken, Task>? BeforeAnswer { get; set; }
 
+    /// <summary>
+    /// For a call whose wait is cancelled (BeforeAnswer throws): the task that
+    /// stands for its PowerShell still running. Null means it has exited.
+    /// </summary>
+    public Func<ScriptCall, Task?>? StillRunningAfterCancel { get; set; }
+
+    /// <summary>Held here, once, by the next Gateway probe; its answer is decided when released.</summary>
+    public TaskCompletionSource? HoldNextGatewayProbe { get; set; }
+
+    /// <summary>Set when a held probe has started waiting.</summary>
+    public TaskCompletionSource ProbeHeld { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    /// <summary>Thrown once by the next Gateway probe.</summary>
+    public Exception? ThrowOnNextGatewayProbe { get; set; }
+
+    /// <summary>A ComfyUI that LocalCanvas started is running (what status.ps1 would find).</summary>
+    public bool ComfyOwnedRunning { get; set; }
+
+    /// <summary>When each call started and, for calls cancelled while running, when they ended.</summary>
+    public readonly ConcurrentQueue<(string Call, DateTime At)> Timeline = new();
+
     public int GatewayProbes;
     public readonly ConcurrentQueue<string?> ProbedInstances = new();
     public event Action? GatewayProbed;
@@ -71,6 +92,7 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
         {
             _calls.Add(call);
         }
+        Timeline.Enqueue(("start " + call.Describe(), DateTime.UtcNow));
         if (BeforeAnswer is not null)
         {
             try
@@ -79,7 +101,10 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
             }
             catch (OperationCanceledException)
             {
-                return new ScriptOutcome(call, ScriptFailure.Cancelled, null, null, string.Empty, TimeSpan.Zero, null);
+                // The end is recorded before the task the launcher waits on completes.
+                var running = StillRunningAfterCancel?.Invoke(call)?.ContinueWith(
+                    _ => Timeline.Enqueue(("ended " + call.Describe(), DateTime.UtcNow)), TaskScheduler.Default);
+                return new ScriptOutcome(call, ScriptFailure.Cancelled, null, null, string.Empty, TimeSpan.Zero, null, 7000, running);
             }
         }
         if (Override?.Invoke(call) is { } replaced)
@@ -93,10 +118,15 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
     {
         if (call.Names("status.ps1"))
         {
-            return Doc.Outcome(call, Doc.Envelope(ConfigOk ? 0 : 2) + $",\"config_ok\":{Doc.Bool(ConfigOk)}}}");
+            var up = LiveInstance is not null;
+            return Doc.Outcome(call, Doc.Envelope(ConfigOk ? 0 : 2) + $",\"config_ok\":{Doc.Bool(ConfigOk)},\"mode\":\"managed\"" +
+                $",\"comfy\":{{\"url\":{Doc.Str(ComfyUrl)},\"healthy\":{Doc.Bool(ComfyUp)},\"ownership\":{Doc.Str(ComfyOwnedRunning ? (StopComfyAction == "record_kept" ? "unproven" : "running") : "none")}}}" +
+                $",\"gateway\":{{\"probe_url\":{Doc.Str(ProbeUrl)},\"reachable\":{Doc.Bool(up)},\"identity\":{Doc.Str(up ? "localcanvas" : "none")},\"instance_id\":{Doc.Str(LiveInstance)}" +
+                $",\"instance_matches_record\":null,\"ownership\":{Doc.Str(up ? "running" : "none")},\"pid\":{(up ? "5001" : "null")},\"published_endpoint\":null}}}}");
         }
         if (call.Names("start.ps1", "-Component", "Comfy"))
         {
+            ComfyOwnedRunning = ComfyOwnership == "owned";
             return Doc.Outcome(call, Doc.StartComfy("ready", ComfyOwnership, ComfyPid));
         }
         if (call.Names("sync-workflows.ps1", "-DryRun", "-NoConvert"))
@@ -132,15 +162,30 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
             {
                 LiveInstance = null;
             }
+            if (StopComfyResult is "exited" or "terminated")
+            {
+                ComfyOwnedRunning = false;
+            }
             return Doc.Outcome(call, Doc.Stop("All", StopGatewayAction, StopGatewayResult, StopComfyAction, StopComfyResult));
         }
         throw new InvalidOperationException("The fake runtime does not know " + call.Describe());
     }
 
-    public Task<GatewayHealth> ProbeGatewayAsync(Uri infoUrl, string? expectedInstanceId, CancellationToken cancellationToken = default)
+    public async Task<GatewayHealth> ProbeGatewayAsync(Uri infoUrl, string? expectedInstanceId, CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref GatewayProbes);
         ProbedInstances.Enqueue(expectedInstanceId);
+        if (ThrowOnNextGatewayProbe is { } thrown)
+        {
+            ThrowOnNextGatewayProbe = null;
+            throw thrown;
+        }
+        if (HoldNextGatewayProbe is { } hold)
+        {
+            HoldNextGatewayProbe = null;
+            ProbeHeld.TrySetResult();
+            await hold.Task;
+        }
         GatewayHealth result;
         if (expectedInstanceId is null)
         {
@@ -159,7 +204,7 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
             result = new GatewayHealth(true, string.Empty, LiveInstance, JobsActive);
         }
         GatewayProbed?.Invoke();
-        return Task.FromResult(result);
+        return result;
     }
 
     public Task<bool> ProbeComfyAsync(Uri comfyBaseUrl, CancellationToken cancellationToken = default) => Task.FromResult(ComfyUp);
@@ -283,11 +328,11 @@ internal sealed class FakeSetup(Func<int?> run) : ISetupConsole
     }
 }
 
-internal sealed class FixedSettings : IRuntimeSettingsReader
+internal sealed class FixedSettings(StartupTimeouts? timeouts = null) : IRuntimeSettingsReader
 {
     public static readonly StartupTimeouts Timeouts = new(TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(20), true);
 
-    public Task<StartupTimeouts> ReadTimeoutsAsync(CancellationToken cancellationToken = default) => Task.FromResult(Timeouts);
+    public Task<StartupTimeouts> ReadTimeoutsAsync(CancellationToken cancellationToken = default) => Task.FromResult(timeouts ?? Timeouts);
 }
 
 internal sealed class MemoryLog : ILauncherLog

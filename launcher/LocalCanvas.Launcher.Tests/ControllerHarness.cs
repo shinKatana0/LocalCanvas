@@ -37,6 +37,10 @@ internal sealed class ControllerHarness : IAsyncDisposable
     public Func<TimeSpan, CancellationToken, Task> Delay { get; set; } =
         static (_, token) => Task.Delay(Timeout.InfiniteTimeSpan, token);
 
+    public Func<ScriptCall, ScriptCall> CallPolicy { get; set; } = static call => call;
+
+    public IRuntimeSettingsReader Settings { get; set; } = new FixedSettings();
+
     public LifecycleController Controller => _controller ?? throw new InvalidOperationException("Start first.");
 
     public TrayViewModel Model => Controller.ViewModel;
@@ -46,12 +50,13 @@ internal sealed class ControllerHarness : IAsyncDisposable
     public LifecycleController Create()
     {
         _controller = new LifecycleController(
-            Runtime, Runtime, Prompts, Setup, new FixedSettings(), Log,
+            Runtime, Runtime, Prompts, Setup, Settings, Log,
             new LifecycleOptions
             {
                 Root = Root,
                 Delay = Delay,
                 FileExists = path => Files.ContainsKey(path),
+                CallPolicy = CallPolicy,
             });
         _controller.ViewModelChanged += model => Published.Enqueue(model);
         return _controller;

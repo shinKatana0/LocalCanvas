@@ -727,8 +727,10 @@ public sealed class ExitTests
 
 public sealed class SessionEndTests
 {
+    private static string[] After(ControllerHarness harness, int before) => harness.Runtime.CallNames.Skip(before).ToArray();
+
     [Fact]
-    public async Task Session_end_stops_everything_without_asking_even_with_active_jobs()
+    public async Task Session_end_stops_everything_without_asking_and_confirms_it_with_status()
     {
         await using var harness = new ControllerHarness();
         var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
@@ -739,10 +741,11 @@ public sealed class SessionEndTests
 
         Assert.True(finished);
         Assert.Empty(harness.Prompts.Asked);
-        var stop = Assert.Single(harness.Runtime.Calls.Skip(before));
-        Assert.Equal("stop.ps1", stop.Script);
+        Assert.Equal(["stop.ps1 -Json", "status.ps1 -Json"], After(harness, before));
+        var stop = harness.Runtime.Calls[before];
         Assert.Empty(stop.Arguments);
-        Assert.Equal(TimeSpan.FromSeconds(10), stop.Timeout);
+        Assert.InRange(stop.Timeout, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10));
+        Assert.Contains(harness.Log.Lines, line => line == "exit: everything LocalCanvas started has stopped (confirmed by status.ps1)");
         Assert.True(controller.Completion.IsCompleted);
     }
 
@@ -758,13 +761,13 @@ public sealed class SessionEndTests
         var finished = await Task.Run(() => harness.Controller.EndSession(TimeSpan.FromSeconds(10)));
 
         Assert.True(finished);
-        Assert.Equal("stop.ps1 -Json", harness.Runtime.CallNames[^1]);
+        Assert.Equal(["stop.ps1 -Json", "status.ps1 -Json"], harness.Runtime.CallNames.TakeLast(2));
         Assert.DoesNotContain(harness.Runtime.Calls, call => call.Names("start.ps1", "-Component", "Gateway"));
         Assert.DoesNotContain(harness.Runtime.Calls, call => call.Names("sync-workflows.ps1"));
     }
 
     [Fact]
-    public async Task Session_end_during_a_script_abandons_the_wait_and_stops()
+    public async Task Session_end_during_a_script_that_has_already_ended_stops_and_confirms()
     {
         await using var harness = new ControllerHarness();
         harness.Runtime.BeforeAnswer = async (call, token) =>
@@ -780,8 +783,85 @@ public sealed class SessionEndTests
         var finished = await Task.Run(() => harness.Controller.EndSession(TimeSpan.FromSeconds(10)));
 
         Assert.True(finished);
-        Assert.Equal("stop.ps1 -Json", harness.Runtime.CallNames[^1]);
+        Assert.Equal(["stop.ps1 -Json", "status.ps1 -Json"], harness.Runtime.CallNames.TakeLast(2));
         Assert.Empty(harness.Prompts.Failures);
+    }
+
+    [Fact]
+    public async Task Session_end_waits_for_a_start_still_in_flight_before_it_stops_anything()
+    {
+        await using var harness = new ControllerHarness();
+        var inFlight = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Runtime.BeforeAnswer = async (call, token) =>
+        {
+            if (call.Names("start.ps1", "-Component", "Gateway"))
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+        };
+        harness.Runtime.StillRunningAfterCancel = call => call.Names("start.ps1", "-Component", "Gateway") ? inFlight.Task : null;
+        harness.Start();
+        await harness.WaitForAsync(_ => harness.Runtime.Calls.Any(call => call.Names("start.ps1", "-Component", "Gateway")), "the Gateway start");
+
+        var ending = Task.Run(() => harness.Controller.EndSession(TimeSpan.FromSeconds(10)));
+        await Task.Delay(700);
+        Assert.DoesNotContain(harness.Runtime.Calls, call => call.Script == "stop.ps1");
+        Assert.False(ending.IsCompleted);
+
+        // The abandoned start finishes after all -- and leaves a Gateway up.
+        harness.Runtime.LiveInstance = FakeRuntime.InstanceId(77);
+        inFlight.SetResult();
+
+        Assert.True(await ending);
+        Assert.Equal(["stop.ps1 -Json", "status.ps1 -Json"], harness.Runtime.CallNames.TakeLast(2));
+        var ended = harness.Runtime.Timeline.Single(entry => entry.Call == "ended start.ps1 -Component Gateway -Json").At;
+        var stopped = harness.Runtime.Timeline.Single(entry => entry.Call == "start stop.ps1 -Json").At;
+        Assert.True(stopped >= ended, "stop.ps1 ran while the start was still running");
+        Assert.Null(harness.Runtime.LiveInstance);
+        Assert.Contains(harness.Log.Lines, line => line == "exit: everything LocalCanvas started has stopped (confirmed by status.ps1)");
+    }
+
+    [Fact]
+    public async Task A_start_still_in_flight_when_the_budget_runs_out_is_never_stopped_beside_and_is_reported()
+    {
+        await using var harness = new ControllerHarness();
+        harness.Runtime.BeforeAnswer = async (call, token) =>
+        {
+            if (call.Names("start.ps1", "-Component", "Gateway"))
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+        };
+        var never = new TaskCompletionSource();
+        harness.Runtime.StillRunningAfterCancel = call => call.Names("start.ps1", "-Component", "Gateway") ? never.Task : null;
+        harness.Start();
+        await harness.WaitForAsync(_ => harness.Runtime.Calls.Any(call => call.Names("start.ps1", "-Component", "Gateway")), "the Gateway start");
+        harness.Runtime.LiveInstance = FakeRuntime.InstanceId(78);
+
+        var finished = await Task.Run(() => harness.Controller.EndSession(TimeSpan.FromSeconds(4)));
+
+        Assert.True(finished);
+        Assert.DoesNotContain(harness.Runtime.Calls, call => call.Script == "stop.ps1");
+        Assert.Equal("status.ps1 -Json", harness.Runtime.CallNames[^1]);
+        var log = harness.Log.Text;
+        Assert.Contains("start.ps1 (PID 7000) was still running, so stop.ps1 was not run beside it", log, StringComparison.Ordinal);
+        Assert.Contains($"The Gateway (PID 5001) is still running and answers as instance {FakeRuntime.InstanceId(78)}.", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("everything LocalCanvas started has stopped", log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task A_clean_looking_stop_is_not_believed_over_what_status_still_finds()
+    {
+        await using var harness = new ControllerHarness();
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+        harness.Runtime.Override = call => call.Names("stop.ps1")
+            ? Doc.Outcome(call, Doc.Stop("All", "none", null, "none", null))
+            : null;
+
+        Assert.True(await Task.Run(() => controller.EndSession(TimeSpan.FromSeconds(10))));
+        var log = harness.Log.Text;
+        Assert.Contains($"The Gateway (PID 5001) is still running and answers as instance {FakeRuntime.InstanceId(1)}.", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("everything LocalCanvas started has stopped", log, StringComparison.Ordinal);
     }
 }
 

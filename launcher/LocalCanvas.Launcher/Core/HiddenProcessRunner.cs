@@ -23,7 +23,8 @@ public sealed record ProcessResult(
     string StandardError,
     TimeSpan Duration,
     string? StartError,
-    bool OutputComplete);
+    bool OutputComplete,
+    Task? StillRunning = null);
 
 public interface IProcessRunner
 {
@@ -88,7 +89,31 @@ public sealed class HiddenProcessRunner : IProcessRunner
         }
 
         var clock = Stopwatch.StartNew();
-        using var process = new Process { StartInfo = info, EnableRaisingEvents = true };
+        var process = new Process { StartInfo = info, EnableRaisingEvents = true };
+        ProcessResult result;
+        try
+        {
+            result = await RunAsync(process, request, clock, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            process.Dispose();
+            throw;
+        }
+        if (result.StillRunning is { } running)
+        {
+            // Handed over with the process still running: it is disposed when it exits.
+            _ = running.ContinueWith(_ => process.Dispose(), TaskScheduler.Default);
+        }
+        else
+        {
+            process.Dispose();
+        }
+        return result;
+    }
+
+    private static async Task<ProcessResult> RunAsync(Process process, ProcessRequest request, Stopwatch clock, CancellationToken cancellationToken)
+    {
         var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         process.Exited += (_, _) => exited.TrySetResult();
         try
@@ -148,11 +173,14 @@ public sealed class HiddenProcessRunner : IProcessRunner
 
         if (timedOut || cancelled)
         {
-            // Left running, on purpose. Its PID is in the result for the log.
+            // Left running, on purpose: the launcher never ends a process. The
+            // caller gets a task that completes when it exits, so that nothing
+            // is ever stopped beside a script that is still running.
+            var running = exited.Task;
             return new ProcessResult(
                 Started: true, TimedOut: timedOut, Cancelled: cancelled, ExitCode: null, ProcessId: processId,
                 StandardOutput: Snapshot(stdout), StandardError: Snapshot(stderr),
-                Duration: clock.Elapsed, StartError: null, OutputComplete: false);
+                Duration: clock.Elapsed, StartError: null, OutputComplete: false, StillRunning: running);
         }
 
         var drained = true;
@@ -178,7 +206,7 @@ public sealed class HiddenProcessRunner : IProcessRunner
             Started: true, TimedOut: false, Cancelled: false, ExitCode: exitCode, ProcessId: processId,
             StandardOutput: Snapshot(stdout), StandardError: Snapshot(stderr),
             Duration: clock.Elapsed, StartError: null, OutputComplete: drained);
-    }
+        }
 
     private static ProcessResult NotStarted(Stopwatch clock, string reason) => new(
         Started: false, TimedOut: false, Cancelled: false, ExitCode: null, ProcessId: null,
