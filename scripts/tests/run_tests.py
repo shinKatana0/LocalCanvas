@@ -3364,8 +3364,9 @@ class RedirectedChildLaunchTests(ScriptTestCase):
         child process each held handle refers to, are checked exactly instead
         of guessed at from a number that other code also moves. The leak
         guard stays a ceiling on the whole process's handle growth: it has
-        never been the flaky side, and a single unclosed handle per launch
-        still lands well above it.
+        never been the flaky side. It reliably catches the three-handle leak;
+        a single unclosed handle per launch lands only just above it, so
+        it is a coarse guard, not a proof that nothing leaks.
         """
         script = "\n".join([
             "$workspace = {}".format(powershell_literal(self.workspace)),
