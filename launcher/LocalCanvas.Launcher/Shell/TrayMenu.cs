@@ -16,6 +16,8 @@ internal sealed class TrayMenu : IDisposable
     private readonly ToolStripMenuItem _sync;
     private readonly ToolStripMenuItem _status;
     private readonly ToolStripMenuItem _exit;
+    private readonly Font _restartRegular;
+    private readonly Font _restartBold;
 
     public TrayMenu(Action restart, Action sync, Action openStatus, Action exit)
     {
@@ -28,6 +30,8 @@ internal sealed class TrayMenu : IDisposable
         _sync = new ToolStripMenuItem("Sync workflows", null, (_, _) => sync());
         _status = new ToolStripMenuItem("Open status", null, (_, _) => openStatus());
         _exit = new ToolStripMenuItem("Exit", null, (_, _) => exit());
+        _restartRegular = _restart.Font;
+        _restartBold = new Font(_restartRegular, FontStyle.Bold);
 
         Strip = new ContextMenuStrip();
         Strip.Items.AddRange(
@@ -56,7 +60,14 @@ internal sealed class TrayMenu : IDisposable
         _sync.Enabled = model.CanSyncWorkflows;
         _status.Enabled = model.CanOpenStatus;
         _exit.Enabled = model.CanExit;
+        // Gateway down: Restart Gateway is the first actionable item, so it
+        // is the one item shown emphasised.
+        _restart.Font = model.State == LauncherState.GatewayDown ? _restartBold : _restartRegular;
     }
 
-    public void Dispose() => Strip.Dispose();
+    public void Dispose()
+    {
+        Strip.Dispose();
+        _restartBold.Dispose();
+    }
 }

@@ -555,7 +555,7 @@ public sealed class SyncCommandTests
         var summary = Assert.Single(harness.Prompts.Messages);
         Assert.Equal(MessageKind.SyncSummary, summary.Kind);
         Assert.Equal(LauncherText.SyncCompleted, summary.Title);
-        Assert.Equal("Updated: 2, Needs review: 1", summary.Text);
+        Assert.Equal("Updated: 2 · Needs review: 1", summary.Text);
         Assert.Contains(LauncherState.Syncing, harness.States);
     }
 
@@ -569,7 +569,7 @@ public sealed class SyncCommandTests
         Assert.True(await controller.RequestSyncWorkflowsAsync());
         Assert.Equal(["sync-workflows.ps1 -Json"], harness.Runtime.CallNames.Skip(before));
         Assert.Equal(LauncherState.Ready, harness.Model.State);
-        Assert.Equal("Updated: 0, Needs review: 0", Assert.Single(harness.Prompts.Messages).Text);
+        Assert.Equal("Updated: 0 · Needs review: 0", Assert.Single(harness.Prompts.Messages).Text);
     }
 
     [Fact]

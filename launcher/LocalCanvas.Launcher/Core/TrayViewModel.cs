@@ -54,7 +54,9 @@ public sealed record TrayViewModel(
     string? PublishedEndpoint,
     string? InstanceId,
     string? ComfyUrl,
-    string LogPath)
+    string LogPath,
+    int? WorkflowsReady = null,
+    int? WorkflowsNeedALook = null)
 {
     /// <summary>The three status lines of the tray menu, in order.</summary>
     public IReadOnlyList<string> StatusLines => [GatewayLine, ComfyLine, WorkflowsLine];

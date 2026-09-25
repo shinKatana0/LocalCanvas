@@ -64,7 +64,7 @@ internal static class Program
             log,
             new LifecycleOptions { Root = root });
 
-        using (var context = new TrayApplicationContext(controller, instance, prompts, log, SessionEndBound))
+        using (var context = new TrayApplicationContext(controller, instance, prompts, log, SessionEndBound, root, pwsh.Path!, processes))
         {
             Application.Run(context);
         }

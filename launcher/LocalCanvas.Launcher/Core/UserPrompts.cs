@@ -44,6 +44,12 @@ public enum MessageKind
 
     /// <summary>Stopping left something running.</summary>
     StopIncomplete,
+
+    /// <summary>
+    /// The Gateway just went down (health monitoring, not a failed restart).
+    /// Shown once per entry into GatewayDown, not on every failed poll.
+    /// </summary>
+    GatewayDown,
 }
 
 public sealed record LauncherMessage(MessageKind Kind, string Title, string Text, string? Details);
@@ -78,7 +84,7 @@ public interface IUserPrompts
 public static class LauncherText
 {
     public const string SetupRequired = "LocalCanvas setup is required before first use.";
-    public const string SetupDidNotFinish = "Setup did not finish";
+    public const string SetupDidNotFinish = "Setup did not finish.";
     public const string CouldNotStart = "LocalCanvas could not start.";
     public const string ActiveJobsRestart = "A generation may still be running. Restart the Gateway anyway?";
     public const string ActiveJobsExit = "A generation may still be running. Exit LocalCanvas anyway?";
@@ -86,10 +92,11 @@ public static class LauncherText
     public const string SyncDidNotComplete = "The workflow sync did not complete.";
     public const string RestartDidNotComplete = "The Gateway could not be restarted.";
     public const string StopIncomplete = "LocalCanvas could not stop everything it started.";
+    public const string GatewayWentDown = "The LocalCanvas Gateway stopped. Right-click the tray icon and choose Restart Gateway.";
 
     public static string ChangesDetected(int changes) =>
         changes == 1 ? "1 workflow change detected." : $"{changes} workflow changes detected.";
 
     public static string SyncSummary(int updated, int needsReview) =>
-        $"Updated: {updated}, Needs review: {needsReview}";
+        $"Updated: {updated} · Needs review: {needsReview}";
 }

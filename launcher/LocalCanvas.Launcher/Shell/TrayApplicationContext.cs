@@ -13,8 +13,12 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly ILauncherLog _log;
     private readonly TimeSpan _sessionEndBound;
     private readonly SessionWindow _window;
+    private readonly TrayIcons _icons;
     private readonly NotifyIcon _icon;
     private readonly TrayMenu _menu;
+    private readonly string _root;
+    private readonly string _pwsh;
+    private readonly IProcessRunner _processes;
     private StatusWindow? _statusWindow;
     private TrayViewModel _current;
     private bool _ending;
@@ -24,20 +28,27 @@ internal sealed class TrayApplicationContext : ApplicationContext
         SingleInstance instance,
         WinFormsPrompts prompts,
         ILauncherLog log,
-        TimeSpan sessionEndBound)
+        TimeSpan sessionEndBound,
+        string root,
+        string pwsh,
+        IProcessRunner processes)
     {
         _controller = controller;
         _log = log;
         _sessionEndBound = sessionEndBound;
+        _root = root;
+        _pwsh = pwsh;
+        _processes = processes;
         _window = new SessionWindow(OnSessionEnding);
         _current = controller.ViewModel;
+        _icons = new TrayIcons();
 
         _menu = new TrayMenu(RequestRestart, RequestSync, OpenStatus, RequestExit);
 
         _icon = new NotifyIcon
         {
             ContextMenuStrip = _menu.Strip,
-            Icon = IconFor(_current.State),
+            Icon = _icons.IconFor(_current.State),
             Text = Clip(_current.Tooltip),
             Visible = true,
         };
@@ -64,7 +75,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             return;
         }
         _icon.Text = Clip(model.Tooltip);
-        _icon.Icon = IconFor(model.State);
+        _icon.Icon = _icons.IconFor(model.State);
         _menu.Apply(model);
         _statusWindow?.Apply(model);
     }
@@ -77,7 +88,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         if (_statusWindow is null || _statusWindow.IsDisposed)
         {
-            _statusWindow = new StatusWindow(RequestRestart, RequestSync, RequestExit);
+            _statusWindow = new StatusWindow(RequestRestart, _root, _pwsh, _processes, _log);
         }
         _statusWindow.Apply(_current);
         _statusWindow.Show();
@@ -137,13 +148,6 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
     }
 
-    private static Icon IconFor(LauncherState state) => state switch
-    {
-        LauncherState.Failed => SystemIcons.Error,
-        LauncherState.GatewayDown or LauncherState.Attention => SystemIcons.Warning,
-        _ => SystemIcons.Application,
-    };
-
     // NotifyIcon.Text is limited to 127 characters.
     private static string Clip(string text) => text.Length <= 127 ? text : text[..127];
 
@@ -155,6 +159,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             _icon.Dispose();
             _menu.Dispose();
             _statusWindow?.Dispose();
+            _icons.Dispose();
             _window.Dispose();
         }
         base.Dispose(disposing);
