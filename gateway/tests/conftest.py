@@ -538,6 +538,7 @@ def gateway_factory(builder, fake_comfy, tmp_path) -> Callable[..., Harness]:
         max_store_bytes: Optional[int] = None,
         prompt_translation: Optional[PromptTranslationConfig] = None,
         translator: Optional[Translator] = None,
+        instance_id: Optional[str] = None,
     ) -> Harness:
         registry = builder.load()
         config = config_for(
@@ -574,6 +575,7 @@ def gateway_factory(builder, fake_comfy, tmp_path) -> Callable[..., Harness]:
             registry=registry,
             media_store=store,
             translator=translator,
+            instance_id=instance_id,
         )
         app = create_app(state)
         # raise_server_exceptions=False so that the catch-all 500 handler is

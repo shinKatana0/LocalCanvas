@@ -8,6 +8,8 @@ can act on instead of a traceback.
 from __future__ import annotations
 
 import io
+import re
+import struct
 import sys
 from pathlib import Path
 
@@ -255,6 +257,56 @@ def test_a_rejected_workflow_is_named_but_does_not_stop_startup(
     assert recorder.calls  # it still served
 
 
+# -- this process's identity ------------------------------------------------
+
+
+def test_an_instance_id_is_generated_and_logged_when_none_is_given(
+    configured: Path,
+) -> None:
+    _, out, _ = run(["--config", str(configured), "--no-mdns", "--no-qr"])
+
+    match = re.search(r"\[INFO\] Instance: ([0-9a-f]{32})", out)
+    assert match, out
+
+
+def test_an_explicit_instance_id_is_used_and_logged(configured: Path) -> None:
+    given = "ab" * 16
+    recorder = Recorder()
+    _, out, _ = run(
+        ["--config", str(configured), "--instance-id", given, "--no-mdns", "--no-qr"],
+        serve=recorder,
+    )
+
+    assert "[INFO] Instance: {}".format(given) in out
+    # ...and it is the same id the app itself carries, not a banner-only echo.
+    assert recorder.calls[0]["app"].state.gateway.instance_id == given
+
+
+def test_two_gateways_started_with_no_instance_id_do_not_collide(
+    configured: Path,
+) -> None:
+    _, first, _ = run(["--config", str(configured), "--no-mdns", "--no-qr"])
+    _, second, _ = run(["--config", str(configured), "--no-mdns", "--no-qr"])
+
+    def instance_id_in(out: str) -> str:
+        match = re.search(r"\[INFO\] Instance: ([0-9a-f]{32})", out)
+        assert match, out
+        return match.group(1)
+
+    assert instance_id_in(first) != instance_id_in(second)
+
+
+def test_a_malformed_instance_id_is_the_gateways_normal_argument_error(
+    configured: Path,
+) -> None:
+    """Too short, upper case, or not hex -- all rejected the same way ``--port``
+    rejects a non-integer: by argparse itself, before anything else runs."""
+
+    for bad in ("not-hex", "AB" * 16, "ab" * 15, ""):
+        with pytest.raises(SystemExit):
+            run(["--config", str(configured), "--instance-id", bad, "--no-mdns", "--no-qr"])
+
+
 # -- failures are readable -------------------------------------------------
 
 
@@ -438,6 +490,89 @@ def _is_a_drawn_code(out: str) -> bool:
 
     body = out.split("\n", 1)[1]
     return bool(body.strip()) and ("█" in body or "\x1b[7m" in body)
+
+
+# -- qr --png ----------------------------------------------------------------
+
+
+#: A PNG's signature, byte for byte (the PNG spec's own magic number).
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_width(data: bytes) -> int:
+    """The pixel width the PNG's own IHDR chunk declares -- read, not assumed.
+
+    Bytes 0-7 are the signature, 8-15 the IHDR chunk's length and type, and
+    16-19 its first field, width, big-endian (the PNG specification).
+    """
+
+    assert data[:8] == _PNG_SIGNATURE, "not a PNG"
+    return struct.unpack(">I", data[16:20])[0]
+
+
+def test_qr_png_writes_a_real_png_of_the_exact_payload(tmp_path: Path, monkeypatch) -> None:
+    """The file is a PNG, and it is a PNG of *this* payload.
+
+    No QR decoder is available in this test environment (checked: pyzbar,
+    zxingcpp, cv2, qrcode are all absent) and installing one is not this
+    card's dependency to add -- ``segno`` is the only one it names. So this
+    is the fallback the test discipline calls for: `segno.make`, the one call
+    that actually turns a string into a code, is spied on rather than
+    mocked -- it still runs -- to prove which string reached it. **Not
+    verified here:** that the pixels this PNG draws would themselves decode
+    back to that string through a camera; only that a real PNG was written
+    and that encoding it started from the exact payload the terminal
+    rendering also encodes (`test_the_qr_subcommand_prints_a_payload_and_a_code`).
+    """
+
+    import segno as segno_module
+
+    real_make = segno_module.make
+    calls = []
+
+    def spy(data, *args, **kwargs):
+        calls.append(data)
+        return real_make(data, *args, **kwargs)
+
+    monkeypatch.setattr(segno_module, "make", spy)
+
+    path = tmp_path / "pairing.png"
+    code, out, _ = run(["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(path)])
+
+    assert code == 0
+    assert calls == ["localcanvas://connect?endpoint=http://198.51.100.3:7801"]
+    assert out.strip() == "localcanvas://connect?endpoint=http://198.51.100.3:7801"
+    assert path.read_bytes()[:8] == _PNG_SIGNATURE
+
+
+def test_qr_png_defaults_to_roughly_300_to_400_px(tmp_path: Path) -> None:
+    path = tmp_path / "pairing.png"
+    run(["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(path)])
+
+    width = _png_width(path.read_bytes())
+    assert 300 <= width <= 400, width
+
+
+def test_qr_png_scale_flag_is_honoured(tmp_path: Path) -> None:
+    """``--scale`` is pixels per module: doubling it must double the width."""
+
+    single = tmp_path / "scale1.png"
+    triple = tmp_path / "scale3.png"
+    run(["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(single), "--scale", "1"])
+    run(["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(triple), "--scale", "3"])
+
+    assert _png_width(triple.read_bytes()) == 3 * _png_width(single.read_bytes())
+
+
+def test_qr_png_write_failure_is_the_commands_normal_error_path(tmp_path: Path) -> None:
+    unwritable = tmp_path / "no-such-directory" / "pairing.png"
+
+    code, _, err = run(
+        ["qr", "--endpoint", "http://198.51.100.3:7801", "--png", str(unwritable)]
+    )
+
+    assert code == 2
+    assert "[FAIL] The QR image could not be written" in err
 
 
 # -- the terminal stays readable -------------------------------------------

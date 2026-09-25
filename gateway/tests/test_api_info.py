@@ -35,11 +35,14 @@ def test_the_identity_document_has_exactly_the_documented_keys(
         "service",
         "api_version",
         "gateway_version",
+        "instance_id",
         "display_name",
         "comfy",
+        "jobs",
         "capabilities",
     }
     assert set(body["comfy"]) == {"status", "detail"}
+    assert set(body["jobs"]) == {"active"}
 
 
 def test_the_service_name_is_exactly_localcanvas(gateway_factory, builder) -> None:
@@ -64,6 +67,115 @@ def test_the_gateway_version_is_the_package_version(gateway_factory, builder) ->
     body = build(gateway_factory, builder).client.get("/api/v1/info").json()
 
     assert body["gateway_version"] == __version__
+
+
+# ==========================================================================
+# instance_id -- this process's identity, not the build's (`docs/api.md`)
+# ==========================================================================
+
+
+def test_instance_id_is_32_lowercase_hex_characters_when_generated(
+    gateway_factory, builder
+) -> None:
+    body = build(gateway_factory, builder).client.get("/api/v1/info").json()
+
+    assert re.fullmatch(r"[0-9a-f]{32}", body["instance_id"])
+
+
+def test_instance_id_equals_the_one_the_gateway_was_given(gateway_factory, builder) -> None:
+    builder.add("flow", EVERY_FIELD)
+    harness = gateway_factory(instance_id="ab" * 16)
+
+    assert harness.client.get("/api/v1/info").json()["instance_id"] == "ab" * 16
+
+
+def test_instance_id_differs_between_two_gateways_started_with_none_given(
+    gateway_factory, builder
+) -> None:
+    """Two processes that never named an id must not collide on a generated one."""
+
+    builder.add("flow", EVERY_FIELD)
+    first = gateway_factory().client.get("/api/v1/info").json()["instance_id"]
+    second = gateway_factory().client.get("/api/v1/info").json()["instance_id"]
+
+    assert first != second
+
+
+# ==========================================================================
+# jobs.active -- a cheap, live count of what this process is still doing
+# ==========================================================================
+
+
+def test_jobs_active_counts_queued_and_running_jobs(gateway_factory, builder) -> None:
+    builder.add("flow", EVERY_FIELD)
+    harness = gateway_factory()
+
+    harness.submit("flow", {"prompt": "a cat"})
+    harness.submit("flow", {"prompt": "a dog"})
+
+    assert harness.client.get("/api/v1/info").json()["jobs"]["active"] == 2
+
+
+def test_jobs_active_excludes_completed_failed_and_cancelled_jobs(
+    gateway_factory, builder
+) -> None:
+    """Driven through real `JobStore` states, not a mocked counter.
+
+    Each of the three terminal states is reached the way the job store's own
+    tests reach it -- moving the fake backend and then reading the job back,
+    which is what actually refreshes its state -- so a counter that read
+    something other than `JobStore` itself would be caught here.
+    """
+
+    builder.add("flow", EVERY_FIELD)
+    harness = gateway_factory()
+
+    completed_id = harness.submit("flow", {"prompt": "completed"}).json()["job_id"]
+    failed_id = harness.submit("flow", {"prompt": "failed"}).json()["job_id"]
+    cancelled_id = harness.submit("flow", {"prompt": "cancelled"}).json()["job_id"]
+    still_queued_id = harness.submit("flow", {"prompt": "still queued"}).json()["job_id"]
+
+    # Submissions and prompt ids arrive in the same order, so this is the
+    # job-id -> prompt-id mapping the fake's own list carries.
+    prompt_of = {
+        job_id: submission["prompt_id"]
+        for job_id, submission in zip(
+            [completed_id, failed_id, cancelled_id, still_queued_id],
+            harness.fake.submissions,
+        )
+    }
+
+    harness.fake.complete(prompt_of[completed_id])
+    harness.client.get("/api/v1/jobs/{}".format(completed_id))  # forces the refresh
+
+    harness.fake.fail(prompt_of[failed_id])
+    harness.client.get("/api/v1/jobs/{}".format(failed_id))
+
+    harness.client.post("/api/v1/jobs/{}/cancel".format(cancelled_id))
+
+    assert harness.client.get("/api/v1/info").json()["jobs"]["active"] == 1
+
+
+def test_jobs_active_is_cheap_no_comfy_call_for_the_count_itself(
+    gateway_factory, builder
+) -> None:
+    """The count comes from the store this process already holds.
+
+    `/info` still probes ComfyUI once for `comfy.status`
+    (`test_info_is_cheap_enough_to_poll`); this asserts the count on top of
+    that costs nothing extra by holding ComfyUI's probe counter still across
+    a burst of calls with jobs outstanding.
+    """
+
+    builder.add("flow", EVERY_FIELD)
+    harness = gateway_factory()
+    harness.submit("flow", {"prompt": "a cat"})
+
+    before = harness.fake.probe_count
+    for _ in range(5):
+        assert harness.client.get("/api/v1/info").json()["jobs"]["active"] == 1
+
+    assert harness.fake.probe_count == before + 1
 
 
 def test_comfy_status_is_ready_with_no_detail_when_it_is(
