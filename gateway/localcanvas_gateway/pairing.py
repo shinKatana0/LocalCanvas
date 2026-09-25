@@ -36,7 +36,7 @@ QR already on the stream.
 from __future__ import annotations
 
 import io
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import quote
 
 import segno
@@ -128,6 +128,41 @@ def pairing_qr_for_stream(
     return pairing_qr(endpoint, compact=compact, border=border)
 
 
+#: The middle of the requested 300-400 px band (`__main__.py`'s ``qr --png``).
+#: A target, not a guarantee: the smallest whole-number scale that reaches it
+#: is what actually gets used, and a very long endpoint can still push the
+#: result a little past 400 rather than draw at a fractional scale.
+_PNG_TARGET_PX = 350
+
+#: The floor of that band.  Below it the search below keeps trying larger
+#: scales instead of settling for whatever ``round()`` produced.
+_PNG_MIN_PX = 300
+
+
+def _png_scale(code: Any) -> int:
+    """The smallest integer scale that draws this code to at least 300 px."""
+
+    width, _ = code.symbol_size(scale=1)
+    scale = max(1, round(_PNG_TARGET_PX / width))
+    while code.symbol_size(scale=scale)[0] < _PNG_MIN_PX:
+        scale += 1
+    return scale
+
+
+def pairing_qr_png(endpoint: str, path: Any, *, scale: Optional[int] = None) -> None:
+    """Write the pairing QR as a PNG at ``path`` -- the same payload, drawn.
+
+    ``scale`` is pixels per module.  Left out, one is picked so the image
+    comes out roughly 300-400 px on a side regardless of how long the
+    endpoint is (`_png_scale`).  Raises whatever writing ``path`` raises: a
+    full disk or a missing directory is the caller's ordinary error path, not
+    a fault this module papers over.
+    """
+
+    code = segno.make(pairing_payload(endpoint), error="m")
+    code.save(path, scale=scale if scale is not None else _png_scale(code))
+
+
 __all__ = [
     "COMPACT_BLOCKS",
     "PAIRING_SCHEME",
@@ -135,6 +170,7 @@ __all__ = [
     "pairing_payload",
     "pairing_qr",
     "pairing_qr_for_stream",
+    "pairing_qr_png",
     "render_qr",
     "stream_can_draw_blocks",
 ]
