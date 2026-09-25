@@ -436,8 +436,16 @@ on the port, not that it is the one this run started. So:
   *this* instance id, and arrives while the process this run started has not
   exited -- the exit is checked after each probe and before its answer is
   trusted. A LocalCanvas answer with another id is not ready. On a timeout, or
-  when the child exits, the child is stopped by its PID, its record removed,
-  and the exit is **5**, as before.
+  when the child exits, the child is stopped by its PID and the exit is **5**,
+  as before. Its record is removed only when the child is proven gone (the stop
+  reports `exited` or `terminated`, or the record now names no live process).
+  A child that is still running keeps its record, because that record is the
+  only thing that lets `stop.ps1` stop it: the failure says so, the `-Json`
+  document's `gateway.pid` names it, and the fix is `pwsh .\scripts\stop.ps1 -Component Gateway`.
+- **The record is written right after the launch.** If it cannot be written,
+  the child just started is stopped by its PID and the exit is **5** -- a
+  gateway nothing could stop later is not left running. If that stop does not
+  take either, the failure names the PID that is still running with no record.
 - **Reuse.** A gateway whose record is `running` is reused only when its
   `/api/v1/info` answers with the instance id its record carries. A record
   with no instance id (written before them) or one that does not answer with

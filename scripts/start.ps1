@@ -226,6 +226,37 @@ function Complete-Run {
     exit $Code
 }
 
+function Stop-LcLaunchedGateway {
+    <#
+        Stop the gateway THIS run launched, through the process object this
+        run holds -- so by its exact PID, never by name or port -- and say
+        whether it is proven gone.
+
+        Gone means Stop-LcOwnedProcess reported 'exited' or 'terminated' AND
+        the process object agrees. Anything else -- 'still-running', or a stop
+        that threw -- is not proof, and a caller must not act as if it were:
+        the ownership record is the only thing that lets stop.ps1 stop a
+        gateway later, so it is removed only for a gateway that is gone.
+    #>
+    param([Parameter(Mandatory)][System.Diagnostics.Process]$Process)
+    $outcome = 'not-attempted'
+    try {
+        $outcome = [string](Stop-LcOwnedProcess -Process $Process -GraceSeconds 5)
+    } catch {
+        $outcome = "the stop failed: $("$($_.Exception.Message)".Trim())"
+    }
+    $gone = $false
+    if ($outcome -in @('exited', 'terminated')) {
+        try {
+            $Process.Refresh()
+            $gone = [bool]$Process.HasExited
+        } catch {
+            $gone = $false
+        }
+    }
+    return [pscustomobject]@{ Outcome = $outcome; Gone = $gone }
+}
+
 function Get-LogText {
     param([string[]]$Paths)
     $text = ''
@@ -856,14 +887,59 @@ try {
             Complete-Run $EXIT_GATEWAY
         }
         $gatewayLaunched = $true
-        [void](Save-LcOwnedProcess -Role 'gateway' -Process $gatewayProcess `
+        # The record is what lets stop.ps1 -- and a launcher's Restart Gateway
+        # -- stop this gateway later. A gateway running without one is a
+        # gateway nothing can stop, and the next start then fails the port
+        # check for ever. So a record that cannot be written undoes the launch.
+        $gatewayRecordPath = Get-LcPidFilePath -Role 'gateway'
+        $recordSaveError = $null
+        try {
+            $gatewayRecordPath = Save-LcOwnedProcess -Role 'gateway' -Process $gatewayProcess `
                 -Endpoint $endpoints.GatewayBaseUrl -CommandLine "$python $gatewayCommandLine" `
                 -Extra ([ordered]@{
                     instance_id        = $instanceId
                     published_endpoint = $endpoint.Url
                     is_lan             = [bool]$endpoint.IsLan
                     local_only_reason  = $endpoint.LocalOnlyReason
-                }))
+                })
+            if (-not (Test-Path -LiteralPath $gatewayRecordPath -PathType Leaf)) {
+                throw "no record is at $gatewayRecordPath after it was written"
+            }
+        } catch {
+            $recordSaveError = "$($_.Exception.Message)".Trim()
+        }
+        if ($null -ne $recordSaveError) {
+            $launchedPid = $gatewayProcess.Id
+            $stopped = Stop-LcLaunchedGateway -Process $gatewayProcess
+            $gatewayResult.status = 'failed'
+            $detail = @("Record: $gatewayRecordPath", $recordSaveError)
+            if ($stopped.Gone) {
+                # Nothing this run wrote may outlive the process it describes:
+                # a partial file left by the failed write goes too, if it can.
+                try { Remove-LcOwnedProcessRecord -Role 'gateway' } catch { }
+                $detail += "The gateway this run started (PID $launchedPid) was stopped ($($stopped.Outcome)): without its record nothing could have stopped it later."
+                if ($comfyOwned) {
+                    $detail += "ComfyUI (PID $comfyPid) was left running; scripts\stop.ps1 will stop it."
+                }
+                Write-LcFailure -What "The gateway's ownership record could not be written" -Detail $detail `
+                    -Fix "Make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath), then start again."
+            } else {
+                # The one outcome with no safe cleanup left: a live gateway
+                # that no record describes. Said as loudly as this can say
+                # anything, with the one number that identifies it.
+                $gatewayResult.pid = $launchedPid
+                $detail += "PID $launchedPid is STILL RUNNING and LocalCanvas has no record of it: scripts\stop.ps1 cannot stop it, and it holds port $gatewayPort."
+                $detail += "Stopping it was attempted: $($stopped.Outcome)."
+                if ($comfyOwned) {
+                    $detail += "ComfyUI (PID $comfyPid) was left running; scripts\stop.ps1 will stop it."
+                }
+                Write-LcFailure -What "The gateway's ownership record could not be written, and the gateway (PID $launchedPid) could not be stopped" `
+                    -Detail $detail `
+                    -Fix ("End PID $launchedPid yourself -- Task Manager, Details tab, by that PID and no other -- " +
+                        "then make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath) and start again.")
+            }
+            Complete-Run $EXIT_GATEWAY
+        }
 
         $gatewayReady = Wait-LcGatewayReady -Url $gatewayHealthUrl -InstanceId $instanceId `
             -ProcessToWatch $gatewayProcess -TimeoutSeconds $gatewayTimeout
@@ -878,16 +954,35 @@ try {
             # this run started, and nothing else. ComfyUI is a different
             # matter: it is expensive to restart and may be reused, so it is
             # left exactly as it is and stop.ps1 is named instead.
-            if ($gatewayProcess) {
-                try { [void](Stop-LcOwnedProcess -Process $gatewayProcess -GraceSeconds 5) } catch { }
+            #
+            # The record goes only with the process: when the stop is proven,
+            # or when the record now names no live process at all. A gateway
+            # that did not exit keeps its record, because that record is the
+            # only thing that lets stop.ps1 stop it.
+            $stopped = Stop-LcLaunchedGateway -Process $gatewayProcess
+            $recordKept = $false
+            if ($stopped.Gone) {
+                Remove-LcOwnedProcessRecord -Role 'gateway'
+            } elseif ((Resolve-LcOwnedProcess -Role 'gateway').State -eq 'stale') {
+                Remove-LcOwnedProcessRecord -Role 'gateway'
+            } else {
+                $recordKept = $true
             }
-            Remove-LcOwnedProcessRecord -Role 'gateway'
             if ($comfyOwned) {
                 $detail += "ComfyUI (PID $comfyPid) was left running; scripts\stop.ps1 will stop it."
             }
             $gatewayResult.status = 'failed'
-            Write-LcFailure -What "The gateway did not become ready within ${gatewayTimeout}s" -Detail $detail `
-                -Fix "Check $gatewayErrLog, or raise startup.gateway_timeout_seconds."
+            if ($recordKept) {
+                $gatewayResult.pid = $gatewayProcess.Id
+                $detail += "The gateway this run started (PID $($gatewayProcess.Id)) did not exit when it was stopped ($($stopped.Outcome)), and is still running."
+                $detail += "Its ownership record was kept ($gatewayRecordPath), so it can still be stopped."
+                Write-LcFailure -What "The gateway did not become ready within ${gatewayTimeout}s, and it is still running (PID $($gatewayProcess.Id))" `
+                    -Detail $detail `
+                    -Fix "Run: pwsh .\scripts\stop.ps1 -Component Gateway   to stop it, then check $gatewayErrLog."
+            } else {
+                Write-LcFailure -What "The gateway did not become ready within ${gatewayTimeout}s" -Detail $detail `
+                    -Fix "Check $gatewayErrLog, or raise startup.gateway_timeout_seconds."
+            }
             Complete-Run $EXIT_GATEWAY
         }
         $gatewayResult.status = 'ready'
