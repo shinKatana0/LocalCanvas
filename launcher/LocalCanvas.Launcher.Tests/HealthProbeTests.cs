@@ -136,9 +136,9 @@ public sealed class HealthProbeTests
     }
 
     [Theory]
-    [InlineData("http://127.0.0.1:17801/api/v1/info", "http://127.0.0.1:17801/api/v1/info")]
-    [InlineData("http://127.0.0.1:17801", "http://127.0.0.1:17801/api/v1/info")]
-    [InlineData("http://[::1]:17801/", "http://[::1]:17801/api/v1/info")]
+    [InlineData("http://127.0.0.1:17810/api/v1/info", "http://127.0.0.1:17810/api/v1/info")]
+    [InlineData("http://127.0.0.1:17810", "http://127.0.0.1:17810/api/v1/info")]
+    [InlineData("http://[::1]:17810/", "http://[::1]:17810/api/v1/info")]
     public void The_info_url_is_taken_from_the_probe_url(string probeUrl, string expected) =>
         Assert.Equal(expected, HttpHealthProbe.InfoUrlFrom(probeUrl).ToString());
 }

@@ -17,8 +17,8 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
     private readonly List<ScriptCall> _calls = [];
     private int _instances;
 
-    public const string ComfyUrl = "http://127.0.0.1:18188";
-    public const string ProbeUrl = "http://127.0.0.1:17801/api/v1/info";
+    public const string ComfyUrl = "http://127.0.0.1:18190";
+    public const string ProbeUrl = "http://127.0.0.1:17810/api/v1/info";
 
     public bool ConfigOk { get; set; } = true;
     public string ComfyOwnership { get; set; } = "owned";
@@ -188,12 +188,12 @@ internal static class Doc
     public static string StartComfy(string status, string ownership, int? pid, int exitCode = 0, string? what = null, string? detail = null, string? fix = null) =>
         Envelope(exitCode, null, what, detail, fix) +
         $",\"component\":\"Comfy\",\"comfy\":{{\"status\":{Str(status)},\"url\":{Str(FakeRuntime.ComfyUrl)},\"ownership\":{Str(ownership)},\"pid\":{Num(pid)}}}" +
-        ",\"gateway\":{\"status\":\"skipped\",\"probe_url\":\"http://127.0.0.1:17801/api/v1/info\",\"instance_id\":null,\"pid\":null,\"published_endpoint\":null,\"is_lan\":null,\"local_only_reason\":null},\"workflows\":null}";
+        ",\"gateway\":{\"status\":\"skipped\",\"probe_url\":\"http://127.0.0.1:17810/api/v1/info\",\"instance_id\":null,\"pid\":null,\"published_endpoint\":null,\"is_lan\":null,\"local_only_reason\":null},\"workflows\":null}";
 
     public static string StartGateway(string status, string? instance, int? pid, int exitCode = 0, string? what = null, string? detail = null, string? fix = null) =>
         Envelope(exitCode, null, what, detail, fix) +
-        ",\"component\":\"Gateway\",\"comfy\":{\"status\":\"skipped\",\"url\":\"http://127.0.0.1:18188\",\"ownership\":\"none\",\"pid\":null}" +
-        $",\"gateway\":{{\"status\":{Str(status)},\"probe_url\":{Str(FakeRuntime.ProbeUrl)},\"instance_id\":{Str(instance)},\"pid\":{Num(pid)},\"published_endpoint\":\"http://192.0.2.10:17801\",\"is_lan\":true,\"local_only_reason\":null}},\"workflows\":null}}";
+        ",\"component\":\"Gateway\",\"comfy\":{\"status\":\"skipped\",\"url\":\"http://127.0.0.1:18190\",\"ownership\":\"none\",\"pid\":null}" +
+        $",\"gateway\":{{\"status\":{Str(status)},\"probe_url\":{Str(FakeRuntime.ProbeUrl)},\"instance_id\":{Str(instance)},\"pid\":{Num(pid)},\"published_endpoint\":\"http://192.0.2.10:17810\",\"is_lan\":true,\"local_only_reason\":null}},\"workflows\":null}}";
 
     public static string Sync(bool dryRun, int changes, int attention, int written, int exitCode = 0, bool? ok = null, string? what = null) =>
         Envelope(exitCode, ok ?? exitCode is 0 or 3, what) +

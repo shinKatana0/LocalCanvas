@@ -179,7 +179,7 @@ public sealed class StartupFailureTests
         await using var harness = new ControllerHarness();
         harness.Runtime.Override = call => call.Names("start.ps1", "-Component", "Comfy")
             ? Doc.Outcome(call, Doc.StartComfy("unreachable", "external", null, exitCode: 4,
-                what: "ComfyUI is not reachable", detail: "Probed: http://127.0.0.1:18188/system_stats", fix: "Start ComfyUI yourself."))
+                what: "ComfyUI is not reachable", detail: "Probed: http://127.0.0.1:18190/system_stats", fix: "Start ComfyUI yourself."))
             : null;
         harness.Start();
         await harness.WaitForExitAsync();
@@ -187,7 +187,7 @@ public sealed class StartupFailureTests
         var failure = Assert.Single(harness.Prompts.Failures);
         Assert.Equal(LauncherText.CouldNotStart, failure.Title);
         Assert.Equal("ComfyUI is not reachable.", failure.What);
-        Assert.Contains("Probed: http://127.0.0.1:18188/system_stats", failure.DetailsText());
+        Assert.Contains("Probed: http://127.0.0.1:18190/system_stats", failure.DetailsText());
         Assert.Contains("Start ComfyUI yourself.", failure.DetailsText());
         Assert.Contains(harness.Log.Location, failure.DetailsText());
         Assert.Contains(LauncherState.Failed, harness.States);
@@ -201,12 +201,12 @@ public sealed class StartupFailureTests
     {
         await using var harness = new ControllerHarness();
         harness.Runtime.Override = call => call.Names("start.ps1", "-Component", "Gateway")
-            ? Doc.Outcome(call, Doc.StartGateway("failed", null, null, exitCode: 5, what: "Port 17801 is already in use"))
+            ? Doc.Outcome(call, Doc.StartGateway("failed", null, null, exitCode: 5, what: "Port 17810 is already in use"))
             : null;
         harness.Start();
         await harness.WaitForExitAsync();
 
-        Assert.Equal("Port 17801 is already in use.", Assert.Single(harness.Prompts.Failures).What);
+        Assert.Equal("Port 17810 is already in use.", Assert.Single(harness.Prompts.Failures).What);
         Assert.Equal("stop.ps1 -Json", harness.Runtime.CallNames[^1]);
     }
 
