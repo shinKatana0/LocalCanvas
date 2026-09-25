@@ -14,14 +14,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly TimeSpan _sessionEndBound;
     private readonly SessionWindow _window;
     private readonly NotifyIcon _icon;
-    private readonly ContextMenuStrip _menu;
-    private readonly ToolStripMenuItem _gateway;
-    private readonly ToolStripMenuItem _comfy;
-    private readonly ToolStripMenuItem _workflows;
-    private readonly ToolStripMenuItem _restart;
-    private readonly ToolStripMenuItem _sync;
-    private readonly ToolStripMenuItem _status;
-    private readonly ToolStripMenuItem _exit;
+    private readonly TrayMenu _menu;
     private StatusWindow? _statusWindow;
     private TrayViewModel _current;
     private bool _ending;
@@ -39,34 +32,11 @@ internal sealed class TrayApplicationContext : ApplicationContext
         _window = new SessionWindow(OnSessionEnding);
         _current = controller.ViewModel;
 
-        var header = new ToolStripMenuItem("LocalCanvas") { Enabled = false };
-        header.Font = new Font(header.Font, FontStyle.Bold);
-        _gateway = new ToolStripMenuItem(_current.GatewayLine) { Enabled = false };
-        _comfy = new ToolStripMenuItem(_current.ComfyLine) { Enabled = false };
-        _workflows = new ToolStripMenuItem(_current.WorkflowsLine) { Enabled = false };
-        _restart = new ToolStripMenuItem("Restart Gateway", null, (_, _) => RequestRestart());
-        _sync = new ToolStripMenuItem("Sync workflows", null, (_, _) => RequestSync());
-        _status = new ToolStripMenuItem("Open status", null, (_, _) => OpenStatus());
-        _exit = new ToolStripMenuItem("Exit", null, (_, _) => RequestExit());
-
-        _menu = new ContextMenuStrip();
-        _menu.Items.AddRange(
-        [
-            header,
-            _gateway,
-            _comfy,
-            _workflows,
-            new ToolStripSeparator(),
-            _restart,
-            _sync,
-            _status,
-            new ToolStripSeparator(),
-            _exit,
-        ]);
+        _menu = new TrayMenu(RequestRestart, RequestSync, OpenStatus, RequestExit);
 
         _icon = new NotifyIcon
         {
-            ContextMenuStrip = _menu,
+            ContextMenuStrip = _menu.Strip,
             Icon = IconFor(_current.State),
             Text = Clip(_current.Tooltip),
             Visible = true,
@@ -95,13 +65,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         }
         _icon.Text = Clip(model.Tooltip);
         _icon.Icon = IconFor(model.State);
-        _gateway.Text = model.GatewayLine;
-        _comfy.Text = model.ComfyLine;
-        _workflows.Text = model.WorkflowsLine;
-        _restart.Enabled = model.CanRestartGateway;
-        _sync.Enabled = model.CanSyncWorkflows;
-        _status.Enabled = model.CanOpenStatus;
-        _exit.Enabled = model.CanExit;
+        _menu.Apply(model);
         _statusWindow?.Apply(model);
     }
 
