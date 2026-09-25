@@ -264,3 +264,53 @@ public sealed class MonitorRobustnessTests
         await harness.WaitForAsync(model => model.State == LauncherState.GatewayDown, "GatewayDown after the unexpected failure");
     }
 }
+
+public sealed class SessionBudgetTests
+{
+    [Fact]
+    public void The_session_end_budget_is_45_seconds() =>
+        Assert.Equal(TimeSpan.FromSeconds(45), LifecycleController.DefaultSessionEndBound);
+
+    [Fact]
+    public async Task With_nothing_measured_the_reserve_is_the_assumption()
+    {
+        await using var harness = new ControllerHarness();
+        var controller = harness.Create();
+        // 1.5 x (8 s + 10 s), under the cap of two thirds of 45 s.
+        Assert.Equal(TimeSpan.FromSeconds(27), controller.StopAndConfirmReserve());
+    }
+
+    [Fact]
+    public async Task The_reserve_follows_what_stop_and_status_took_in_this_session()
+    {
+        await using var harness = new ControllerHarness();
+        harness.Runtime.DurationOf = call => call.Script switch
+        {
+            "status.ps1" => TimeSpan.FromSeconds(8),
+            "stop.ps1" => TimeSpan.FromSeconds(5),
+            _ => TimeSpan.FromMilliseconds(5),
+        };
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+        // status.ps1 measured at startup, stop.ps1 still assumed: 1.5 x (8 + 8).
+        Assert.Equal(TimeSpan.FromSeconds(24), controller.StopAndConfirmReserve());
+
+        Assert.True(await controller.RequestRestartGatewayAsync());
+        // stop.ps1 measured by the restart: 1.5 x (5 + 8).
+        Assert.Equal(TimeSpan.FromSeconds(19.5), controller.StopAndConfirmReserve());
+    }
+
+    [Fact]
+    public async Task The_reserve_has_a_floor_and_leaves_the_call_in_flight_a_third_of_the_budget()
+    {
+        await using var harness = new ControllerHarness();
+        harness.Runtime.DurationOf = call => call.Script == "status.ps1" ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromMilliseconds(5);
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+        harness.Runtime.DurationOf = call => call.Script == "stop.ps1" ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromMilliseconds(5);
+        Assert.True(await controller.RequestRestartGatewayAsync());
+        Assert.Equal(TimeSpan.FromSeconds(10), controller.StopAndConfirmReserve());
+
+        harness.Runtime.DurationOf = call => call.Script == "stop.ps1" ? TimeSpan.FromSeconds(40) : TimeSpan.FromMilliseconds(5);
+        Assert.True(await controller.RequestRestartGatewayAsync());
+        Assert.Equal(TimeSpan.FromSeconds(30), controller.StopAndConfirmReserve());
+    }
+}

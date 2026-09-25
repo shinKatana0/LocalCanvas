@@ -655,6 +655,8 @@ public sealed class ExitTests
         Assert.Equal(before, harness.Runtime.Calls.Count);
         Assert.False(controller.Completion.IsCompleted);
         Assert.True(harness.Model.CanExit);
+        // Cancelled: the tray no longer says it is exiting.
+        Assert.Equal(LauncherState.Ready, harness.Model.State);
 
         harness.Prompts.JobsAnswer = true;
         Assert.True(await controller.RequestExitAsync());
@@ -715,8 +717,13 @@ public sealed class ExitTests
         harness.Start();
         await harness.WaitForAsync(_ => harness.Runtime.Calls.Any(call => call.Script == "start.ps1"), "the ComfyUI start");
         var exit = harness.Controller.RequestExitAsync();
+        // Shown at once, while the start it waits for still runs.
+        Assert.Equal(LauncherState.Stopping, harness.Model.State);
+        Assert.Equal("LocalCanvas — Exiting…", harness.Model.Tooltip);
+        Assert.False(harness.Model.CanExit);
         await Task.Delay(100);
         Assert.False(exit.IsCompleted);
+        Assert.Equal(LauncherState.Stopping, harness.Model.State);
         release.SetResult();
 
         Assert.True(await exit.WaitAsync(TimeSpan.FromSeconds(10)));

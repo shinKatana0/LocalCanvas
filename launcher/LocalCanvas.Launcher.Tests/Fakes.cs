@@ -52,6 +52,9 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
     /// </summary>
     public Func<ScriptCall, Task?>? StillRunningAfterCancel { get; set; }
 
+    /// <summary>How long each call is reported to have taken (the default is 5 ms).</summary>
+    public Func<ScriptCall, TimeSpan>? DurationOf { get; set; }
+
     /// <summary>Held here, once, by the next Gateway probe; its answer is decided when released.</summary>
     public TaskCompletionSource? HoldNextGatewayProbe { get; set; }
 
@@ -107,11 +110,8 @@ internal sealed class FakeRuntime : IScriptRunner, IHealthProbe
                 return new ScriptOutcome(call, ScriptFailure.Cancelled, null, null, string.Empty, TimeSpan.Zero, null, 7000, running);
             }
         }
-        if (Override?.Invoke(call) is { } replaced)
-        {
-            return replaced;
-        }
-        return Answer(call);
+        var outcome = Override?.Invoke(call) ?? Answer(call);
+        return DurationOf is null ? outcome : outcome with { Duration = DurationOf(call) };
     }
 
     private ScriptOutcome Answer(ScriptCall call)

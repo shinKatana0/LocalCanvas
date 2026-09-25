@@ -63,12 +63,18 @@ folder must contain `scripts\start.ps1`. It is not a user setting.
   starts after each probe ends and a failed probe may use its whole timeout.
   There is no automatic restart.
 - When Windows signs out or shuts down, the launcher stops what LocalCanvas
-  started through `stop.ps1`, holding the session for at most 25 seconds with
-  the reason "Stopping LocalCanvas". A script call still running at that
-  moment is waited for first (keeping 10 seconds of the budget for the stop);
-  if it is still running then, nothing is stopped beside it. Either way
-  `status.ps1` then confirms what is still running, and the log says exactly
-  that. Best effort: Windows may end the session sooner.
+  started through `stop.ps1`, holding the session for at most 45 seconds. It
+  registers the shutdown block reason "Stopping LocalCanvas" for that time, so
+  Windows shows it and waits for the user rather than ending the launcher
+  after its usual few seconds. A script call still running at that moment is
+  waited for first; the time kept back for `stop.ps1` and `status.ps1` is 1.5
+  times what they last took in this session (at least 10 s, at most two thirds
+  of the budget). If the call is still running then, nothing is stopped
+  beside it. Either way `status.ps1` then confirms what is still running, and
+  the log says exactly that -- including, when it could not finish in time,
+  that nothing was confirmed. Best effort: the user can end the session sooner.
+- An Exit asked for while a script call is still running waits for it, and the
+  tray says "Exiting…" from the moment it is asked.
 - An exit is reported as complete only when `stop.ps1` accounted for both the
   Gateway and ComfyUI, or when `status.ps1` confirmed it; otherwise the user is
   told what is, or may still be, running.

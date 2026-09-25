@@ -65,7 +65,13 @@ public sealed class LifecycleController : IAsyncDisposable
     private int _tickQueued;
     private volatile bool _sessionEnding;
     private volatile bool _exited;
-    private TimeSpan _sessionBound = TimeSpan.FromSeconds(25);
+    private TimeSpan _sessionBound = DefaultSessionEndBound;
+    private readonly object _publishGate = new();
+
+    // How long stop.ps1 and status.ps1 took when last run in this session:
+    // what the session-end sequence keeps for them.
+    private TimeSpan? _lastStopDuration;
+    private TimeSpan? _lastStatusDuration;
     private DateTime _sessionDeadline = DateTime.MaxValue;
 
     // Everything below is read and written by the queue's consumer only.
@@ -117,6 +123,19 @@ public sealed class LifecycleController : IAsyncDisposable
 
     /// <summary>The launcher has finished: the tray icon is to be removed and the process to end.</summary>
     public event Action? ExitCompleted;
+
+    /// <summary>
+    /// How long a Windows sign-out or shutdown is held for the exit sequence:
+    /// waiting for a script call still in flight, stop.ps1, then status.ps1 to
+    /// confirm. A registered shutdown block reason makes Windows show it and
+    /// wait for the user rather than end the process after its usual few
+    /// seconds, so the bound is the launcher's own, not a Windows limit.
+    /// </summary>
+    public static readonly TimeSpan DefaultSessionEndBound = TimeSpan.FromSeconds(45);
+
+    /// <summary>Kept for stop.ps1 and status.ps1 when nothing has been measured yet.</summary>
+    public static readonly TimeSpan AssumedStopDuration = TimeSpan.FromSeconds(8);
+    public static readonly TimeSpan AssumedStatusDuration = TimeSpan.FromSeconds(10);
 
     public TrayViewModel ViewModel => _viewModel;
 
@@ -176,6 +195,8 @@ public sealed class LifecycleController : IAsyncDisposable
         {
             return Task.FromResult(false);
         }
+        // Shown now, even while the call in flight still has the queue.
+        Publish();
         return Enqueue("exit", async () =>
         {
             var exited = await RunExitAsync(ExitMode.User).ConfigureAwait(false);
@@ -1047,6 +1068,7 @@ public sealed class LifecycleController : IAsyncDisposable
             var timeout = mode == ExitMode.SessionEnd ? Positive(SessionRemaining) : LauncherCalls.StopAllTimeout;
             // Not cancelled by the session ending: this is the work the session end is for.
             var stop = await _scripts.RunAsync(LauncherCalls.StopAll(timeout), CancellationToken.None).ConfigureAwait(false);
+            Observe(stop);
             stopProblems.AddRange(StopProblems(stop));
             details = stop.HasDocument ? StopDocument.Read(stop.Document!.Value).Envelope.Error?.Detail : stop.StandardErrorTail();
             foreach (var problem in stopProblems)
@@ -1122,6 +1144,40 @@ public sealed class LifecycleController : IAsyncDisposable
     /// bounded by the session budget, keeping time for the stop and its
     /// confirmation; otherwise the call's own grace has already been waited.
     /// </summary>
+    /// <summary>
+    /// What the stop and its confirmation are expected to need: 1.5 times what
+    /// they took when last run in this session (an assumption before that), at
+    /// least 10 s, and never more than two thirds of the budget, so that a call
+    /// in flight always has some of it.
+    /// </summary>
+    internal TimeSpan StopAndConfirmReserve()
+    {
+        var expected = 1.5 * (_lastStopDuration ?? AssumedStopDuration) + 1.5 * (_lastStatusDuration ?? AssumedStatusDuration);
+        var floor = TimeSpan.FromSeconds(10);
+        var cap = _sessionBound * 2 / 3;
+        var reserve = expected < floor ? floor : expected;
+        return reserve > cap ? cap : reserve;
+    }
+
+    private static string Seconds(TimeSpan? span) => span is { } found ? $"{found.TotalSeconds:0.0} s" : "nothing";
+
+    /// <summary>Remember how long stop.ps1 and status.ps1 take here.</summary>
+    private void Observe(ScriptOutcome outcome)
+    {
+        if (outcome.Failure != ScriptFailure.None)
+        {
+            return;
+        }
+        if (outcome.Call.Script == "stop.ps1")
+        {
+            _lastStopDuration = outcome.Duration;
+        }
+        else if (outcome.Call.Script == "status.ps1")
+        {
+            _lastStatusDuration = outcome.Duration;
+        }
+    }
+
     private async Task<bool> WaitForAbandonedAsync(ExitMode mode)
     {
         if (_abandoned is not { } still || !still.IsStillRunning)
@@ -1131,7 +1187,9 @@ public sealed class LifecycleController : IAsyncDisposable
         var wait = TimeSpan.Zero;
         if (mode == ExitMode.SessionEnd)
         {
-            var reserve = TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(10).Ticks, _sessionBound.Ticks / 2));
+            var reserve = StopAndConfirmReserve();
+            _log.Write($"exit: keeping {reserve.TotalSeconds:0.#} s of the session budget for stop.ps1 and status.ps1 " +
+                       $"(last measured {Seconds(_lastStopDuration)} and {Seconds(_lastStatusDuration)})");
             wait = SessionRemaining - reserve;
         }
         if (wait > TimeSpan.Zero)
@@ -1165,6 +1223,7 @@ public sealed class LifecycleController : IAsyncDisposable
         }
         _log.Write("exit: confirming with status.ps1");
         var status = await _scripts.RunAsync(LauncherCalls.Status(timeout), CancellationToken.None).ConfigureAwait(false);
+        Observe(status);
         if (!status.HasDocument)
         {
             return (false, leftovers, status.DescribeFailure());
@@ -1285,6 +1344,7 @@ public sealed class LifecycleController : IAsyncDisposable
                 $"{still.Call.Script}{Pid(still.ProcessId)} from an earlier step is still running, and nothing is run beside it.");
         }
         var outcome = await _scripts.RunAsync(call, SessionToken).ConfigureAwait(false);
+        Observe(outcome);
         if (outcome.Failure is ScriptFailure.TimedOut or ScriptFailure.Cancelled)
         {
             _anyCallAbandoned = true;
@@ -1396,31 +1456,41 @@ public sealed class LifecycleController : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Build and raise a snapshot. Serialised: the queue's consumer publishes,
+    /// and so does a request for Exit the moment it is queued.
+    /// </summary>
     private void Publish()
     {
-        var snapshot = BuildViewModel();
-        _viewModel = snapshot;
-        try
+        lock (_publishGate)
         {
-            ViewModelChanged?.Invoke(snapshot);
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
-        {
-            // A shell already gone; the next snapshot is not its business.
+            var snapshot = BuildViewModel();
+            _viewModel = snapshot;
+            try
+            {
+                ViewModelChanged?.Invoke(snapshot);
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or ObjectDisposedException)
+            {
+                // A shell already gone; the next snapshot is not its business.
+            }
         }
     }
 
     private TrayViewModel BuildViewModel()
     {
         var exitClaimed = Volatile.Read(ref _exitClaimed) != 0;
+        // An Exit that is queued behind a call in flight is shown at once: the
+        // tray says it is exiting, not what the call it waits for is doing.
+        var shown = exitClaimed ? LauncherState.Stopping : _state;
         var busy = Volatile.Read(ref _commandClaimed) != 0 || exitClaimed
                    || _state is LauncherState.Starting or LauncherState.Syncing or LauncherState.Restarting or LauncherState.Stopping;
         var actionable = !busy && !_exited
                          && _state is LauncherState.Ready or LauncherState.Attention or LauncherState.GatewayDown;
         return new TrayViewModel(
-            State: _state,
-            Tooltip: TrayViewModel.TooltipFor(_state),
-            GatewayLine: "Gateway: " + GatewayStatus(),
+            State: shown,
+            Tooltip: TrayViewModel.TooltipFor(shown),
+            GatewayLine: "Gateway: " + GatewayStatus(shown),
             ComfyLine: "ComfyUI: " + ComfyStatus(),
             WorkflowsLine: "Workflows: " + WorkflowsStatus(),
             Busy: busy,
@@ -1435,7 +1505,7 @@ public sealed class LifecycleController : IAsyncDisposable
             LogPath: _log.Location);
     }
 
-    private string GatewayStatus() => _state switch
+    private string GatewayStatus(LauncherState state) => state switch
     {
         LauncherState.Starting => "Starting…",
         LauncherState.Restarting => "Restarting…",
@@ -1444,7 +1514,7 @@ public sealed class LifecycleController : IAsyncDisposable
         LauncherState.GatewayDown => "DOWN",
         LauncherState.Ready or LauncherState.Attention => "Ready",
         LauncherState.Syncing => _gatewayHealthy ? "Ready" : "Starting…",
-        _ => _state.ToString(),
+        _ => state.ToString(),
     };
 
     private string ComfyStatus()

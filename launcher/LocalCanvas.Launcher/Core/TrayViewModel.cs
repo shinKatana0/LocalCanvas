@@ -21,7 +21,7 @@ public enum LauncherState
     /// <summary>The Gateway stopped answering as the instance LocalCanvas started, or could not be restarted.</summary>
     GatewayDown,
 
-    /// <summary>Everything LocalCanvas started is being stopped.</summary>
+    /// <summary>Exit has been asked for: everything LocalCanvas started is being, or is about to be, stopped.</summary>
     Stopping,
 
     /// <summary>Startup failed.</summary>
@@ -67,7 +67,7 @@ public sealed record TrayViewModel(
         LauncherState.Attention => "Workflows need attention",
         LauncherState.Restarting => "Restarting the Gateway…",
         LauncherState.GatewayDown => "Gateway down",
-        LauncherState.Stopping => "Stopping…",
+        LauncherState.Stopping => "Exiting…",
         LauncherState.Failed => "Could not start",
         _ => state.ToString(),
     };

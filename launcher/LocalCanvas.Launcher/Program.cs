@@ -7,9 +7,12 @@ internal static class Program
 {
     /// <summary>
     /// How long the launcher holds a Windows sign-out or shutdown to stop what
-    /// it started. Best effort: Windows may end the session sooner.
+    /// it started (see LifecycleController.DefaultSessionEndBound). The window
+    /// registers a shutdown block reason for that time, so Windows shows
+    /// "Stopping LocalCanvas" and waits for the user instead of ending the
+    /// process after a few seconds. Best effort: the user can still end it sooner.
     /// </summary>
-    public static readonly TimeSpan SessionEndBound = TimeSpan.FromSeconds(25);
+    public static readonly TimeSpan SessionEndBound = LifecycleController.DefaultSessionEndBound;
 
     [STAThread]
     private static int Main(string[] args)

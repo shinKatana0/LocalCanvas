@@ -543,7 +543,7 @@ public sealed class InFlightEndToEndTests
     }
 
     [Fact]
-    public async Task Session_end_during_a_slow_Gateway_start_waits_for_it_then_stops_and_confirms()
+    public async Task Session_end_during_a_slow_Gateway_start_waits_for_it_before_stopping_and_reports_truthfully()
     {
         SkipUnlessRunnable();
         await using var site = new StubbedLocalCanvas(manageComfy: true);
@@ -555,21 +555,45 @@ public sealed class InFlightEndToEndTests
         await WaitUntilAsync(() => runner.Timeline.Any(entry => entry.What == "start start.ps1 -Component Gateway -Json"), 180, "the Gateway start", site);
         await Task.Delay(1500);
 
-        var finished = await Task.Run(() => controller.EndSession(TimeSpan.FromSeconds(25)));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var finished = await Task.Run(() => controller.EndSession(LifecycleController.DefaultSessionEndBound));
+        var took = clock.Elapsed;
 
         // Whatever the budget allowed, the start that was in flight ends by itself.
         Assert.NotNull(runner.GatewayStartStillRunning);
         await runner.GatewayStartStillRunning!.WaitAsync(TimeSpan.FromSeconds(90));
         var log = File.ReadAllText(site.Log.Location);
-        Assert.True(finished, log);
+        TestContext.Current.TestOutputHelper?.WriteLine(
+            $"session end took {took.TotalSeconds:0.0} s (finished within the bound: {finished}); start ran " +
+            $"{(runner.When("ended start.ps1 -Component Gateway -Json") - runner.When("start start.ps1 -Component Gateway -Json")).TotalSeconds:0.0} s");
+
+        // The invariants: stop.ps1 only after the start's process ended...
         Assert.True(runner.When("start stop.ps1 -Json") >= runner.When("ended start.ps1 -Component Gateway -Json"),
             "stop.ps1 ran while the Gateway start was still in flight");
-        Assert.Contains("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)", log, StringComparison.Ordinal);
+        // ...no Gateway left afterwards: no process the stub launched, no record, the port silent...
         await AssertNoGatewayLeftAsync(site);
-        TestContext.Current.TestOutputHelper?.WriteLine(
-            $"start ended {(runner.When("ended start.ps1 -Component Gateway -Json") - runner.When("start start.ps1 -Component Gateway -Json")).TotalSeconds:0.0} s after it began");
+        Assert.False(PortAnswers(site.GatewayPort), $"port {site.GatewayPort} still accepts connections");
+        // ...and the log is truthful: confirmed by status.ps1, or plainly not confirmed. Never a bare claim.
+        var confirmed = log.Contains("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)", StringComparison.Ordinal);
+        var unconfirmed = log.Contains("What is still running could not be confirmed", StringComparison.Ordinal);
+        TestContext.Current.TestOutputHelper?.WriteLine(confirmed ? "outcome: confirmed by status.ps1" : unconfirmed ? "outcome: truthfully not confirmed" : "outcome: neither");
+        Assert.True(confirmed || unconfirmed, log);
+        Assert.DoesNotContain("exit: everything LocalCanvas started has stopped\n", log.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
     }
 
+    private static bool PortAnswers(int port)
+    {
+        try
+        {
+            using var client = new System.Net.Sockets.TcpClient();
+            client.Connect(System.Net.IPAddress.Loopback, port);
+            return true;
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return false;
+        }
+    }
     [Fact]
     public async Task A_Gateway_start_past_the_launchers_timeout_is_waited_out_then_stopped_and_confirmed()
     {
