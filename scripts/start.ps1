@@ -935,8 +935,8 @@ try {
                 }
                 Write-LcFailure -What "The gateway's ownership record could not be written, and the gateway (PID $launchedPid) could not be stopped" `
                     -Detail $detail `
-                    -Fix ("Stop PID $launchedPid yourself -- Stop-Process -Id $launchedPid -- then make sure LocalCanvas " +
-                        "can write to $(Split-Path -Parent $gatewayRecordPath) and start again.")
+                    -Fix ("End PID $launchedPid yourself -- Task Manager, Details tab, by that PID and no other -- " +
+                        "then make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath) and start again.")
             }
             Complete-Run $EXIT_GATEWAY
         }

@@ -25490,6 +25490,234 @@ class HiddenConsoleTests(StartWorkflowTestCase, MachineInterfaceTestCase):
         self.assertEqual("unasked", document["workflows"]["sync"]["answer"])
 
 
+def current_user_sid():
+    """The SID of the account this suite runs as, from whoami. Asks nothing else."""
+    result = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=60)
+    found = re.search(r"(S-1-[0-9-]+)", result.stdout or "")
+    return found.group(1) if found else None
+
+
+class GatewayRecordLifecycleTests(MachineInterfaceTestCase):
+    """The gateway's ownership record outlives the gateway, never the other way round.
+
+    A live gateway with no record is one nothing can stop: stop.ps1 finds no
+    record, the tray's Restart Gateway cannot stop it, and every later start
+    fails the port check. Two paths used to produce one -- a readiness timeout
+    whose stop did not take, and a record that could not be written.
+    """
+
+    def deny_creating_files_in(self, directory):
+        """Make ``directory`` refuse new files, while its existing files stay writable.
+
+        The one way to make the record write fail after the launch and not
+        before: start.ps1 truncates its two logs (existing files) before it
+        launches, and creates gateway.pid (a new file) right after. The deny
+        entry is on this test's own runtime directory, inside its own
+        workspace -- asserted before anything is changed -- and it is taken
+        off again before the workspace is removed.
+        """
+        directory = Path(directory).resolve()
+        workspace = Path(self.workspace).resolve()
+        self.assertIn(workspace, directory.parents,
+                      "refusing to change the permissions of a directory outside this test's workspace")
+        sid = current_user_sid()
+        if not sid:
+            self.skipTest("the SID of this account could not be read, so the record write "
+                          "could not be made to fail: the save-failure path was NOT verified")
+        denied = subprocess.run(["icacls", str(directory), "/deny", "*{}:(WD)".format(sid)],
+                                capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=60)
+        self.assertEqual(0, denied.returncode, denied.stdout + denied.stderr)
+        self.addCleanup(subprocess.run, ["icacls", str(directory), "/remove:d", "*{}".format(sid)],
+                        capture_output=True, timeout=60)
+        # The fixture proves itself before anything relies on it: a new file
+        # is refused, and an existing one can still be rewritten.
+        probe = directory / "probe.tmp"
+        try:
+            probe.write_text("x", encoding="utf-8")
+        except OSError:
+            pass
+        else:
+            probe.unlink()
+            self.skipTest("this account can create files through a deny entry (an elevated "
+                          "backup privilege?), so the record write could not be made to fail: "
+                          "the save-failure path was NOT verified")
+        for log in ("gateway.out.log", "gateway.err.log"):
+            (directory / log).write_text("", encoding="utf-8")
+
+    def prepare_unwritable_record(self):
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        for log in ("gateway.out.log", "gateway.err.log"):
+            (self.runtime_dir / log).write_text("", encoding="utf-8")
+        self.deny_creating_files_in(self.runtime_dir)
+
+    @staticmethod
+    def pid_named_in(text):
+        found = re.search(r"PID (\d+)", text or "")
+        return int(found.group(1)) if found else None
+
+    def test_a_gateway_still_running_after_a_timeout_keeps_its_record(self):
+        """The stop does not take: the record stays, and stop.ps1 can still use it.
+
+        The copy under test cannot stop anything (copy_scripts_with_stopping_disabled
+        asserts it carries no Stop-Process at all), so the gateway it launched
+        is still running when the timeout path decides about its record.
+        """
+        self.write_config(gateway_timeout=3)
+        copied = self.copy_scripts_with_stopping_disabled()
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway", script_dir=copied,
+            env=self.script_env(LC_STUB_GATEWAY_HANG="1"))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+
+        record = self.read_pid_file("gateway")
+        self.assertIsNotNone(record, "the record of a gateway that is still running was removed:\n" + output)
+        launched = record["pid"]
+        self.addCleanup(self.force_terminate, launched)
+        self.assertTrue(self.alive(launched), output)
+        self.assertEqual([launched], self.launched_gateway_pids())
+        self.assertEqual(document["gateway"]["instance_id"], record["instance_id"])
+
+        # Said plainly, in the text and in the document.
+        gateway = document["gateway"]
+        self.assertEqual("failed", gateway["status"])
+        self.assertEqual(launched, gateway["pid"])
+        self.assertFalse(document["ok"])
+        error = document["error"]
+        self.assertIn("still running (PID {})".format(launched), error["what"])
+        self.assertIn("pwsh .\\scripts\\stop.ps1 -Component Gateway", error["fix"])
+        self.assertIn("Its ownership record was kept", error["detail"])
+        self.assertIn("[FAIL] " + error["what"], result.stderr)
+
+        # And the record is good for what it was kept for: the real stop.ps1
+        # stops that gateway by it, and only then removes it.
+        stop, stopped = self.run_json("stop.ps1", "-Component", "Gateway")
+        self.assertEqual(0, stop.returncode, self.output_of(stop))
+        self.assertEqual("running", stopped["roles"]["gateway"]["state_before"])
+        self.assertEqual("stop", stopped["roles"]["gateway"]["action"])
+        self.assertTrue(wait_until(lambda: not self.alive(launched), 20))
+        self.assertIsNone(self.read_pid_file("gateway"))
+
+    def test_a_gateway_that_exited_after_a_timeout_has_its_record_removed(self):
+        """The control: a stop that took removes the record, as before."""
+        self.write_config(gateway_timeout=3)
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway", env=self.script_env(LC_STUB_GATEWAY_HANG="1"))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIsNone(self.read_pid_file("gateway"))
+        for pid in self.launched_gateway_pids():
+            self.assertTrue(wait_until(lambda: not self.alive(pid), 20), pid)
+        self.assertEqual("The gateway did not become ready within 3s", document["error"]["what"])
+        self.assertIsNone(document["gateway"]["pid"])
+
+    def test_a_record_that_cannot_be_written_stops_the_gateway_it_would_describe(self):
+        self.write_config()
+        self.prepare_unwritable_record()
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        error = document["error"]
+        self.assertEqual("The gateway's ownership record could not be written", error["what"], output)
+        self.assertIn("Record: {}".format(self.runtime_dir / "gateway.pid"), error["detail"])
+        launched = self.pid_named_in(error["detail"])
+        self.assertIsNotNone(launched, output)
+        self.addCleanup(self.force_terminate, launched)
+        self.assertIn("was stopped", error["detail"])
+        self.assertIn("Make sure LocalCanvas can write to", error["fix"])
+        self.assertEqual("failed", document["gateway"]["status"])
+        self.assertIsNone(document["gateway"]["pid"])
+        # No live orphan: the gateway it launched is gone, nothing answers on
+        # the port, and there is no record of anything.
+        self.assertTrue(wait_until(lambda: not self.alive(launched), 20),
+                        "the gateway this run launched is still running with no record")
+        self.assertFalse(http_ok(self.gateway_health_url))
+        self.assertIsNone(self.read_pid_file("gateway"))
+        self.assertNotIn("[ OK ] Gateway ready", output)
+
+    def test_a_record_that_cannot_be_written_and_a_gateway_that_cannot_be_stopped_is_loud(self):
+        """The one ending with no safe cleanup left: exit 5, and the PID named."""
+        self.write_config()
+        copied = self.copy_scripts_with_stopping_disabled()
+        self.prepare_unwritable_record()
+        result, document = self.run_json("start.ps1", "-Component", "Gateway", script_dir=copied)
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        launched = document["gateway"]["pid"]
+        self.assertIsInstance(launched, int, output)
+        self.addCleanup(self.force_terminate, launched)
+        self.assertTrue(self.alive(launched))
+        self.assertEqual("failed", document["gateway"]["status"])
+        error = document["error"]
+        self.assertIn("could not be written", error["what"])
+        self.assertIn("could not be stopped", error["what"])
+        self.assertIn("(PID {})".format(launched), error["what"])
+        self.assertIn("PID {} is STILL RUNNING".format(launched), error["detail"])
+        self.assertIn("End PID {} yourself".format(launched), error["fix"])
+        self.assertIsNone(self.read_pid_file("gateway"))
+
+
+class SyncEngineErrorJsonTests(StartWorkflowTestCase, MachineInterfaceTestCase):
+    """sync-workflows.ps1 -Json, engine exit 2: the error is the engine's own words."""
+
+    def run_sync(self, mode, *extra_args):
+        return self.run_script(
+            "sync-workflows.ps1", "-RuntimeConfig", str(self.config_path), *extra_args,
+            config=self.sources_config, env=self.sync_env(mode=mode))
+
+    def test_the_engine_fail_lines_are_the_error(self):
+        result = self.run_sync("fatal", "-Json")
+        self.assertEqual(2, result.returncode, self.output_of(result))
+        error = self.json_document(result)["error"]
+        self.assertEqual(
+            "{}: no workflow sources configuration here.".format(self.sources_config), error["what"])
+        detail = error["detail"].split("\n")
+        self.assertEqual([
+            "[FAIL] {}: no workflow sources configuration here.".format(self.sources_config),
+            "Copy config/examples/workflow-sources.example.yaml to config/local/workflow-sources.yaml",
+            "No file was written.",
+        ], detail)
+
+    def test_the_human_output_is_unchanged(self):
+        plain = self.run_sync("fatal")
+        machine = self.run_sync("fatal", "-Json")
+        self.assertEqual(2, plain.returncode)
+        self.assertEqual(plain.stdout.splitlines(), machine.stderr.splitlines())
+        self.assertIn("[FAIL] {}".format(self.sources_config), plain.stdout)
+
+    def test_an_inventory_that_was_not_written_says_so_without_the_marker(self):
+        result = self.run_sync("inventory", "-Json")
+        self.assertEqual(2, result.returncode, self.output_of(result))
+        error = self.json_document(result)["error"]
+        self.assertTrue(error["what"].startswith("the inventory could not replace the previous one"),
+                        error["what"])
+        self.assertNotIn("[INVENTORY_NOT_WRITTEN]", error["detail"])
+        self.assertTrue(error["detail"].endswith("The next successful sync will record them."),
+                        error["detail"])
+
+    def test_the_engine_text_is_bounded(self):
+        result = self.run_sync("fatal-long", "-Json")
+        self.assertEqual(2, result.returncode, self.output_of(result))
+        error = self.json_document(result)["error"]
+        self.assertEqual(500, len(error["what"]))
+        self.assertTrue(error["what"].endswith("..."))
+        detail = error["detail"].split("\n")
+        # 40 engine lines, the count of the rest, and the closing sentence.
+        self.assertEqual(42, len(detail), detail)
+        self.assertTrue(all(len(line) <= 500 for line in detail))
+        self.assertEqual("engine line 39", detail[39])
+        self.assertEqual("... and 20 more line(s), on standard error", detail[40])
+        self.assertEqual("No file was written.", detail[41])
+        # All of it is still on standard error.
+        self.assertIn("engine line 59", result.stderr)
+
+
 CI_GROUP_OPTION = "--ci-group"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 
@@ -25498,6 +25726,7 @@ CI_GROUPS = {
         "ProcessOwnershipLintTests", "InlineCodeQuoteLintTests", "ReadinessContractTests",
         "ConfigurationTests", "ConfigurationSeamTests", "EndpointOwnershipTests",
         "ManagedModeTests", "ChildStreamEncodingTests", "ComponentTests", "GatewayPortCheckTests",
+        "GatewayRecordLifecycleTests",
     ],
     "runtime-stop": [
         "RedirectedChildLaunchTests", "ExternalModeTests", "StopTests", "ProcessIdentityTests",
@@ -25536,6 +25765,7 @@ CI_GROUPS = {
     "sync-and-comfy-install": [
         "WorkflowSyncTests", "StartWorkflowCheckTests", "StartWorkflowMutationTests",
         "ComfyDryRunTests", "ComfyInstallTests", "SyncJsonTests", "HiddenConsoleTests",
+        "SyncEngineErrorJsonTests",
     ],
     "comfy-bootstrap": [
         "ComfyExistingInstallationTests", "ComfyLinkedPathTests", "ComfyRefusalTests",
