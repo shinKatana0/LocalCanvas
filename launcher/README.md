@@ -52,7 +52,11 @@ folder must contain `scripts\start.ps1`. It is not a user setting.
   running any script.
 - Script calls run with no window, standard input closed, one at a time. A
   timeout, a crash or anything but one JSON document on standard output is a
-  failure; a script that outlives its timeout is left running, never ended.
+  failure. A script that outlives its timeout is never ended: the launcher
+  waits a further grace period (for a start, the configured startup timeout)
+  for it to end by itself, and runs nothing beside it while it is running --
+  in particular never `stop.ps1`, which would find absent what the start is
+  about to create.
 - The Gateway and ComfyUI are probed every 5 seconds (2-second timeout, no
   proxy). Two failed Gateway probes in a row are *Gateway down*: detected
   within 2 × (5 s + 2 s) = 14 s of the Gateway going away, since the wait
@@ -60,6 +64,13 @@ folder must contain `scripts\start.ps1`. It is not a user setting.
   There is no automatic restart.
 - When Windows signs out or shuts down, the launcher stops what LocalCanvas
   started through `stop.ps1`, holding the session for at most 25 seconds with
-  the reason "Stopping LocalCanvas". Best effort: Windows may end it sooner.
+  the reason "Stopping LocalCanvas". A script call still running at that
+  moment is waited for first (keeping 10 seconds of the budget for the stop);
+  if it is still running then, nothing is stopped beside it. Either way
+  `status.ps1` then confirms what is still running, and the log says exactly
+  that. Best effort: Windows may end the session sooner.
+- An exit is reported as complete only when `stop.ps1` accounted for both the
+  Gateway and ComfyUI, or when `status.ps1` confirmed it; otherwise the user is
+  told what is, or may still be, running.
 - Log: `.runtime\launcher.log` (or under `LOCALCANVAS_RUNTIME_DIR`), capped at
   1 MB with one previous generation kept. Nothing is sent anywhere.
