@@ -510,11 +510,7 @@ function Write-LcFailure {
         [string]$Fix,
         [System.Management.Automation.ErrorRecord]$ErrorRecord
     )
-    $script:LcLastFailure = [ordered]@{
-        what   = $What
-        detail = $(if (@($Detail).Count -gt 0) { (@($Detail) | ForEach-Object { "$_" }) -join "`n" } else { $null })
-        fix    = $(if ($Fix) { $Fix } else { $null })
-    }
+    Set-LcLastFailure -What $What -Detail $Detail -Fix $Fix
     Write-LcLine ''
     Write-LcFail $What
     foreach ($line in $Detail) { Write-LcDetail $line }
@@ -534,6 +530,26 @@ function Write-LcFailure {
         }
     }
     Write-LcLine ''
+}
+
+function Set-LcLastFailure {
+    <#
+        Record a failure for the -Json document WITHOUT printing it. For the
+        one kind of failure whose lines were already printed in somebody
+        else's words -- the sync engine's own [FAIL] block -- so that the
+        document carries those words instead of only an exit code, and the
+        terminal does not get a second, reworded copy of them.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$What,
+        [string[]]$Detail = @(),
+        [string]$Fix
+    )
+    $script:LcLastFailure = [ordered]@{
+        what   = $What
+        detail = $(if (@($Detail).Count -gt 0) { (@($Detail) | ForEach-Object { "$_" }) -join "`n" } else { $null })
+        fix    = $(if ($Fix) { $Fix } else { $null })
+    }
 }
 
 function Get-LcLastFailure {
@@ -2010,7 +2026,10 @@ function Save-LcOwnedProcess {
         foreach ($key in @($Extra.Keys)) { $record[[string]$key] = $Extra[$key] }
     }
     $path = Get-LcPidFilePath -Role $Role
-    Set-Content -LiteralPath $path -Value ($record | ConvertTo-Json -Depth 4) -Encoding UTF8
+    # Stop, whatever the caller's preference: a record that was not written
+    # has to reach the caller as a failure, because a launched process with no
+    # record is one nothing can stop later.
+    Set-Content -LiteralPath $path -Value ($record | ConvertTo-Json -Depth 4) -Encoding UTF8 -ErrorAction Stop
     return $path
 }
 
