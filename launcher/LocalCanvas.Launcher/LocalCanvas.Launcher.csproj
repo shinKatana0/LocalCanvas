@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>LocalCanvas</AssemblyName>
+    <RootNamespace>LocalCanvas.Launcher</RootNamespace>
+    <AssemblyTitle>LocalCanvas</AssemblyTitle>
+    <Description>Starts LocalCanvas and keeps it in the Windows system tray.</Description>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Required by the source-generated interop for the two shutdown-reason calls. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="LocalCanvas.Launcher.Tests" />
+  </ItemGroup>
+
+</Project>
