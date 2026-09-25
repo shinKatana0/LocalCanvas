@@ -12202,14 +12202,19 @@ class WorkflowSyncTests(ScriptTestCase):
                       "this test scans nothing")
         parameters = re.findall(r"^\s*\[(?:string|switch)\]\$(\w+)", text, re.MULTILINE)
         # RegenerateLabels (T-0116) changes what a run writes into labels and
-        # help, and hides nothing the report prints.
+        # help, and hides nothing the report prints. Json moves the whole
+        # human report to standard error and hides nothing either -- proved
+        # below, not claimed.
         self.assertEqual(
             ["Config", "RuntimeConfig", "PythonExe", "NoConvert", "DryRun",
-             "RegenerateLabels"],
+             "RegenerateLabels", "Json"],
             parameters)
 
         output = self.output_of(self.run_sync())
         self.assertIn("Not exposed: node 4 input 'ckpt_name' [weights_file]", output)
+        machine = self.run_sync("-Json")
+        self.assertIn("Not exposed: node 4 input 'ckpt_name' [weights_file]", machine.stderr)
+        self.assertNotIn("Not exposed:", machine.stdout)
 
     # -- what ComfyUI converted --------------------------------------------
 
