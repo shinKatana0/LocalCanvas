@@ -21,6 +21,11 @@ app/build/
 app/android/.gradle/
 app/android/local.properties
 
+# .NET build output of the Windows launcher.
+launcher/**/bin/
+launcher/**/obj/
+launcher/**/TestResults/
+
 # Signing material. None ships; a keystore you create stays out of git.
 app/android/key.properties
 *.jks
