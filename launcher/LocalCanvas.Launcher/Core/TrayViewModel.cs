@@ -61,12 +61,18 @@ public sealed record TrayViewModel(
     /// <summary>The three status lines of the tray menu, in order.</summary>
     public IReadOnlyList<string> StatusLines => [GatewayLine, ComfyLine, WorkflowsLine];
 
-    public static string StateText(LauncherState state) => state switch
+    /// <param name="attentionCount">
+    /// How many workflows need a look, used only for <see cref="LauncherState.Attention"/>:
+    /// the Gateway is Ready, so the word said is still "Ready", with the count
+    /// alongside it -- never the separate word "Attention", which names no
+    /// state the Gateway line or the tray menu ever shows either.
+    /// </param>
+    public static string StateText(LauncherState state, int? attentionCount = null) => state switch
     {
         LauncherState.Starting => "Starting…",
         LauncherState.Ready => "Ready",
         LauncherState.Syncing => "Syncing workflows…",
-        LauncherState.Attention => "Workflows need attention",
+        LauncherState.Attention => attentionCount is > 0 ? $"Ready ({Plural(attentionCount.Value, "workflow")} need{(attentionCount == 1 ? "s" : string.Empty)} a look)" : "Ready",
         LauncherState.Restarting => "Restarting the Gateway…",
         LauncherState.GatewayDown => "Gateway down",
         LauncherState.Stopping => "Exiting…",
@@ -74,5 +80,8 @@ public sealed record TrayViewModel(
         _ => state.ToString(),
     };
 
-    public static string TooltipFor(LauncherState state) => "LocalCanvas — " + StateText(state);
+    public static string TooltipFor(LauncherState state, int? attentionCount = null) => "LocalCanvas — " + StateText(state, attentionCount);
+
+    private static string Plural(int count, string noun) =>
+        $"{count.ToString(System.Globalization.CultureInfo.InvariantCulture)} {noun}" + (count == 1 ? string.Empty : "s");
 }

@@ -39,6 +39,22 @@ public sealed class TrayMenuTests
     }
 
     [Fact]
+    public void Restart_Gateway_is_bold_only_while_the_Gateway_is_down()
+    {
+        using var menu = new TrayMenu(() => { }, () => { }, () => { }, () => { });
+        var restart = () => menu.Strip.Items.Cast<ToolStripItem>().Single(item => item.Text == "Restart Gateway");
+
+        menu.Apply(Model(LauncherState.Ready, actionable: true));
+        Assert.False(restart().Font.Bold);
+
+        menu.Apply(Model(LauncherState.GatewayDown, actionable: true));
+        Assert.True(restart().Font.Bold);
+
+        menu.Apply(Model(LauncherState.Attention, actionable: true));
+        Assert.False(restart().Font.Bold);
+    }
+
+    [Fact]
     public void Each_action_reaches_its_handler()
     {
         var clicked = new List<string>();

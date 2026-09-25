@@ -368,6 +368,41 @@ public sealed class HealthTests
     }
 
     [Fact]
+    public async Task One_balloon_is_shown_on_entering_Gateway_down_not_on_every_failed_poll()
+    {
+        await using var harness = new ControllerHarness();
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+
+        harness.Runtime.LiveInstance = null;
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        Assert.Equal(LauncherState.GatewayDown, harness.Model.State);
+        Assert.Equal(1, harness.Prompts.Messages.Count(message => message.Kind == MessageKind.GatewayDown));
+
+        // Still down: three more failed polls raise no further balloon.
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        Assert.Equal(1, harness.Prompts.Messages.Count(message => message.Kind == MessageKind.GatewayDown));
+        var only = harness.Prompts.Messages.Single(message => message.Kind == MessageKind.GatewayDown);
+        Assert.Equal("Gateway down", only.Title);
+        Assert.Equal(
+            "The LocalCanvas Gateway stopped. Right-click the tray icon and choose Restart Gateway.",
+            only.Text);
+
+        // Recovers, then goes down again: a second, distinct entry gets its own balloon.
+        var live = FakeRuntime.InstanceId(1);
+        harness.Runtime.LiveInstance = live;
+        await controller.TickHealthAsync();
+        Assert.Equal(LauncherState.Ready, harness.Model.State);
+        harness.Runtime.LiveInstance = null;
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        Assert.Equal(LauncherState.GatewayDown, harness.Model.State);
+        Assert.Equal(2, harness.Prompts.Messages.Count(message => message.Kind == MessageKind.GatewayDown));
+    }
+
+    [Fact]
     public async Task ComfyUI_going_down_is_a_status_line_and_not_a_state()
     {
         await using var harness = new ControllerHarness();

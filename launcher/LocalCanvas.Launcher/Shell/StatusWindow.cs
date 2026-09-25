@@ -99,7 +99,11 @@ internal sealed class StatusWindow : Form
         _restart.Click += (_, _) => restart();
         _copyAddress.Click += (_, _) => CopyAddress();
         _openLogs.Click += (_, _) => OpenFolder.InExplorer(LauncherLog.RuntimeDirectory(_root));
-        _close.Click += (_, _) => Close();
+        // Same as the window's own titlebar close: the window is dismissed,
+        // LocalCanvas keeps running, and the single instance is reused (not
+        // re-created, with a needless second QR fetch) the next time the
+        // tray's Open status is used.
+        _close.Click += (_, _) => Hide();
 
         CancelButton = _close;
     }
@@ -159,42 +163,61 @@ internal sealed class StatusWindow : Form
         {
             return;
         }
-        if (owner.IsCancellationRequested || IsDisposed || !IsHandleCreated)
+        if (owner.IsCancellationRequested || IsDisposed)
         {
+            return;
+        }
+        void Apply()
+        {
+            if (owner.IsCancellationRequested || IsDisposed)
+            {
+                return;
+            }
+            ApplyQrResult(path);
+        }
+        try
+        {
+            // No handle anywhere in the chain (the window has never been
+            // shown, as in a test that never calls Show()): InvokeRequired is
+            // false, and the result is applied directly on this thread. Once
+            // shown, the real seam's WritePngAsync genuinely goes async, so
+            // this resumes on a thread-pool thread and is marshalled instead.
+            if (InvokeRequired)
+            {
+                BeginInvoke(Apply);
+            }
+            else
+            {
+                Apply();
+            }
+        }
+        catch (InvalidOperationException)
+        {
+            // The window's handle (or ObjectDisposedException, which derives
+            // from it) went away between the check above and the call.
+        }
+    }
+
+    private void ApplyQrResult(string? path)
+    {
+        if (path is null)
+        {
+            _qrFallback.Text = "No pairing QR available. Use the address above.";
+            _qrFallback.Visible = true;
+            SetQrImage(null);
             return;
         }
         try
         {
-            BeginInvoke(() =>
-            {
-                if (owner.IsCancellationRequested || IsDisposed)
-                {
-                    return;
-                }
-                if (path is null)
-                {
-                    _qrFallback.Text = "No pairing QR available. Use the address above.";
-                    _qrFallback.Visible = true;
-                    SetQrImage(null);
-                    return;
-                }
-                try
-                {
-                    using var stream = new MemoryStream(File.ReadAllBytes(path));
-                    SetQrImage(Image.FromStream(stream));
-                    _qrFallback.Visible = false;
-                }
-                catch (IOException)
-                {
-                    _qrFallback.Text = "No pairing QR available. Use the address above.";
-                    _qrFallback.Visible = true;
-                    SetQrImage(null);
-                }
-            });
+            using var stream = new MemoryStream(File.ReadAllBytes(path));
+            SetQrImage(Image.FromStream(stream));
+            _qrFallback.Visible = false;
         }
-        catch (InvalidOperationException)
+        catch (IOException)
         {
-            // The window's handle went away between the check above and the call.
+            _qrFallback.Text = "No pairing QR available. Use the address above.";
+            _qrFallback.Visible = true;
+            SetQrImage(null);
         }
     }
 
