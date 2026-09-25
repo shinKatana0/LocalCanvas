@@ -25743,11 +25743,42 @@ class SyncEngineErrorJsonTests(StartWorkflowTestCase, MachineInterfaceTestCase):
         ], detail)
 
     def test_the_human_output_is_unchanged(self):
+        """The whole terminal text of an engine exit 2, pinned line for line.
+
+        Exactly one [FAIL] line -- the engine's -- then the engine's own lines,
+        then the closing sentence, and nothing else. Recording the failure for
+        the document must not print a second, reworded [FAIL] block; comparing
+        the plain run with the -Json run alone cannot see that, because such a
+        block would appear in both.
+        """
         plain = self.run_sync("fatal")
         machine = self.run_sync("fatal", "-Json")
-        self.assertEqual(2, plain.returncode)
-        self.assertEqual(plain.stdout.splitlines(), machine.stderr.splitlines())
-        self.assertIn("[FAIL] {}".format(self.sources_config), plain.stdout)
+        self.assertEqual(2, plain.returncode, self.output_of(plain))
+        expected = [
+            "",
+            "LocalCanvas",
+            "",
+            "[INFO] LocalCanvas workflow sync",
+            "       Repository: <repo>",
+            "       Interpreter: {}".format(sys.executable),
+            "       Configuration: {}".format(self.sources_config),
+            "",
+            "[FAIL] {}: no workflow sources configuration here.".format(self.sources_config),
+            "       Copy config/examples/workflow-sources.example.yaml to config/local/workflow-sources.yaml",
+            "",
+            "       No file was written.",
+            "",
+        ]
+        repo_line = "       Repository: {}".format(REPO)
+
+        def normalised(text):
+            return ["       Repository: <repo>" if line == repo_line else line
+                    for line in text.splitlines()]
+
+        self.assertEqual(expected, normalised(plain.stdout))
+        self.assertEqual(1, plain.stdout.count("[FAIL]"), plain.stdout)
+        # And -Json moves the very same lines to standard error.
+        self.assertEqual(expected, normalised(machine.stderr))
 
     def test_an_inventory_that_was_not_written_says_so_without_the_marker(self):
         result = self.run_sync("inventory", "-Json")
