@@ -116,6 +116,10 @@ $report = $null
 # How many of the workflows that need a look a -Json document lists by name.
 # The engine's own report lists every one of them, and can run to megabytes.
 $AttentionItemsCap = 50
+# How much of the engine's own exit-2 text a -Json error carries: lines, and
+# characters per line. Its whole text is on standard error regardless.
+$EngineDetailLines = 40
+$EngineLineChars = 500
 
 function Complete-Run {
     <#
@@ -256,6 +260,39 @@ function Write-EngineLines {
     }
 }
 
+function Get-LcEngineFailure {
+    <#
+        The engine's exit-2 lines as a -Json error: What is its first [FAIL]
+        line without the tag (or its first line, when it wrote no tag), and
+        Detail is every line it wrote, trimmed, in order.
+
+        Bounded, because the lines are the engine's and their length is not
+        this script's to assume: at most $EngineDetailLines lines of at most
+        $EngineLineChars characters each, with a line saying how many more
+        are on standard error. The [INVENTORY_NOT_WRITTEN] marker is a signal
+        for this script, not a sentence for a reader, and is left out -- the
+        closing sentence the caller adds says what it means.
+    #>
+    param([string[]]$Lines)
+    $said = @(@($Lines) | ForEach-Object { "$_".Trim() } |
+            Where-Object { $_ -and $_ -cne '[INVENTORY_NOT_WRITTEN]' })
+    $cut = {
+        param([string]$Text)
+        if ($Text.Length -le $EngineLineChars) { return $Text }
+        return $Text.Substring(0, $EngineLineChars - 3) + '...'
+    }
+    $first = @($said | Where-Object { $_ -match '^\[FAIL\]' } | Select-Object -First 1)
+    $what = ''
+    if ($first.Count -gt 0) { $what = ($first[0] -replace '^\[FAIL\]\s*', '').Trim() }
+    if (-not $what -and $said.Count -gt 0) { $what = $said[0] }
+    if (-not $what) { $what = 'The sync could not be started' }
+    $detail = @($said | Select-Object -First $EngineDetailLines | ForEach-Object { & $cut $_ })
+    if ($said.Count -gt $EngineDetailLines) {
+        $detail += "... and $($said.Count - $EngineDetailLines) more line(s), on standard error"
+    }
+    return [pscustomobject]@{ What = (& $cut $what); Detail = $detail }
+}
+
 try {
     Write-LcBanner
     Write-LcInfo 'LocalCanvas workflow sync'
@@ -365,11 +402,18 @@ try {
         $inventoryNotWritten = @($stderr | Where-Object {
                 $_ -and $_.Trim() -ceq '[INVENTORY_NOT_WRITTEN]' }).Count -gt 0
         if ($inventoryNotWritten) {
-            Write-LcDetail 'The inventory was not written, but definitions, imported workflow graphs and conversion snapshots this run wrote may already be on disk. The next successful sync will record them.'
+            $closing = 'The inventory was not written, but definitions, imported workflow graphs and conversion snapshots this run wrote may already be on disk. The next successful sync will record them.'
         } else {
-            Write-LcDetail 'No file was written.'
+            $closing = 'No file was written.'
         }
+        Write-LcDetail $closing
         Write-LcLine ''
+        # The document's error is the engine's own words, not "Exited with
+        # code 2": the lines above are the only description of what is wrong,
+        # and a caller showing error.detail has nothing else to show. Recorded
+        # without printing -- the terminal already has them, verbatim.
+        $failure = Get-LcEngineFailure -Lines $said
+        Set-LcLastFailure -What $failure.What -Detail (@($failure.Detail) + @($closing))
         Complete-Run $EXIT_CONFIG
     }
 
