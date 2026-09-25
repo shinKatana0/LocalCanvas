@@ -55,8 +55,9 @@ folder must contain `scripts\start.ps1`. It is not a user setting.
   failure; a script that outlives its timeout is left running, never ended.
 - The Gateway and ComfyUI are probed every 5 seconds (2-second timeout, no
   proxy). Two failed Gateway probes in a row are *Gateway down*: detected
-  within 2 × 5 s + 2 × 2 s of the Gateway going away. There is no automatic
-  restart.
+  within 2 × (5 s + 2 s) = 14 s of the Gateway going away, since the wait
+  starts after each probe ends and a failed probe may use its whole timeout.
+  There is no automatic restart.
 - When Windows signs out or shuts down, the launcher stops what LocalCanvas
   started through `stop.ps1`, holding the session for at most 25 seconds with
   the reason "Stopping LocalCanvas". Best effort: Windows may end it sooner.

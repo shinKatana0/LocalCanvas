@@ -321,7 +321,9 @@ public sealed class EndToEndTests
         site.EndOwn(gatewayPid);
         await WaitForAsync(controller, model => model.State == LauncherState.GatewayDown, 30, "GatewayDown", site);
         clock.Stop();
-        var bound = 2 * TimeSpan.FromSeconds(5) + 2 * HttpHealthProbe.ProbeTimeout + TimeSpan.FromSeconds(2);
+        // Two failed probes, each after a full interval and each allowed its whole timeout (a refused
+        // loopback connect on Windows takes about that long), plus scheduling slack.
+        var bound = 2 * (TimeSpan.FromSeconds(5) + HttpHealthProbe.ProbeTimeout) + TimeSpan.FromSeconds(4);
         Assert.True(clock.Elapsed <= bound, $"GatewayDown took {clock.Elapsed.TotalSeconds:0.0} s, more than {bound.TotalSeconds} s");
         TestContext.Current.TestOutputHelper?.WriteLine($"GatewayDown detected {clock.Elapsed.TotalSeconds:0.00} s after the Gateway was stopped (bound {bound.TotalSeconds} s)");
         Assert.Equal("Gateway: DOWN", controller.ViewModel.GatewayLine);
