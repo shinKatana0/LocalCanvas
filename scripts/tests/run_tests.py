@@ -25151,12 +25151,13 @@ class GatewayPortCheckTests(MachineInterfaceTestCase):
 class JsonDocumentTests(MachineInterfaceTestCase):
     """-Json: one document on standard output, on every exit path of every script."""
 
-    def unusable_runtime_env(self):
-        # A runtime directory that cannot be created, because a FILE is in
-        # the way: the one failure every script meets as an unexpected one.
-        blocker = self.workspace / "a file, not a directory"
-        blocker.write_text("x", encoding="utf-8")
-        return self.script_env(LOCALCANVAS_RUNTIME_DIR=str(blocker / "runtime"))
+    def write_config_with_a_port_that_is_not_a_number(self):
+        """A configuration the stub loader passes through and the scripts
+        cannot use: gateway.port is text. Reading it is an unexpected failure
+        -- exit 1 -- rather than a configuration one."""
+        self.write_config()
+        self.write_config(body=self.config_path.read_text(encoding="utf-8").replace(
+            "  port: {}\nstartup".format(self.gateway_port), "  port: not-a-port\nstartup"))
 
     def test_start_prints_one_document_on_every_exit_path(self):
         cases = []
@@ -25167,8 +25168,8 @@ class JsonDocumentTests(MachineInterfaceTestCase):
             "start.ps1", "-SyncWorkflows", "-SkipWorkflowCheck", "-Json")))
         cases.append(("missing configuration", 2, self.run_script(
             "start.ps1", "-Json", config=self.workspace / "no such.yaml")))
-        cases.append(("unexpected", 1, self.run_script(
-            "start.ps1", "-Component", "Gateway", "-Json", env=self.unusable_runtime_env())))
+        self.write_config_with_a_port_that_is_not_a_number()
+        cases.append(("unexpected", 1, self.run_script("start.ps1", "-Component", "Gateway", "-Json")))
         self.write_config(comfy_timeout=3, comfy_extra_args=[
             "--port", str(self.comfy_port), "--launch-marker", str(self.comfy_marker), "--never-ready"])
         cases.append(("managed ComfyUI never ready", 3, self.run_script("start.ps1", "-Json")))
@@ -25283,8 +25284,7 @@ class JsonDocumentTests(MachineInterfaceTestCase):
         self.assertFalse(document["config_ok"])
         self.assertIsNone(document["mode"])
 
-        self.write_config(body=self.config_path.read_text(encoding="utf-8").replace(
-            "  port: {}\nstartup".format(self.gateway_port), "  port: not-a-port\nstartup"))
+        self.write_config_with_a_port_that_is_not_a_number()
         result = self.run_script("status.ps1", "-Json")
         self.assertEqual(1, result.returncode, self.output_of(result))
         self.json_document(result)
@@ -25383,6 +25383,17 @@ class SyncJsonTests(StartWorkflowTestCase, MachineInterfaceTestCase):
                 else:
                     self.assertIsNotNone(document["error"])
                     self.assertIsNone(document["counts"])
+
+    def test_start_json_exit_6_is_one_document_too(self):
+        # The check cannot run, and there is no catalogue to start on.
+        self.write_workflow("one.json", self.api_graph(seed=3))
+        result, document = self.run_json(
+            "start.ps1", "-WorkflowSources", str(self.sources_config), env=self.sync_env(mode="fatal"))
+        self.assertEqual(6, result.returncode, self.output_of(result))
+        self.assertEqual("failed", document["workflows"]["status"])
+        self.assertEqual("LocalCanvas has no workflow catalogue to start on", document["error"]["what"])
+        self.assertEqual("skipped", document["gateway"]["status"])
+        self.assertFalse(self.gateway_marker.exists())
 
     def test_start_json_with_a_sync_keeps_the_sync_document_off_stdout(self):
         self.establish_catalogue()
