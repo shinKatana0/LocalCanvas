@@ -269,8 +269,12 @@ $zipPath = Join-Path $OutputDirectory $zipName
 if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+# $packageRoot itself, not $stagingRoot: includeBaseDirectory=true names the
+# zip's top-level entries after the LEAF of the folder it is given, and the
+# leaf has to be LocalCanvas\ -- the staging folder's own name must never
+# leak into the archive.
 [System.IO.Compression.ZipFile]::CreateFromDirectory(
-    $stagingRoot, $zipPath,
+    $packageRoot, $zipPath,
     [System.IO.Compression.CompressionLevel]::Optimal, $true)
 
 $zipInfo = Get-Item -LiteralPath $zipPath
