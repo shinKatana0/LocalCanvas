@@ -224,7 +224,11 @@ minutes. A wrong answer is worse than none, because it is acted upon.
 **Windows gets 15 seconds to answer:** that query, like every WMI/CIM read the
 scripts make, is bounded by one constant (`$script:SystemQueryTimeoutSeconds` in
 `scripts/lib/Common.ps1`), and an identity not answered within it is unreadable,
-so the record is **unproven** — kept, and nothing is stopped.
+so the record is **unproven** — kept, and nothing is stopped. A process
+`start.ps1` has *just launched* is never recorded that way: when its identity
+cannot be read, `start.ps1` stops it by the handle it holds and fails (exit 3 for
+ComfyUI, 5 for the gateway), so it never leaves a process it started that
+`stop.ps1` could not stop.
 
 **What happens to the record** depends on what the evidence proves:
 
