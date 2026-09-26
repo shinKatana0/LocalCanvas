@@ -782,6 +782,7 @@ HELPER_SCRIPTS = (
 #: Each carries ENTRY_SCRIPT_REQUIRES on its first line like an entry script,
 #: but none prints the entry banner, so the entry-script run tests skip them.
 MAINTAINER_SCRIPTS = (
+    "launcher/package.ps1",
     "launcher/tools/generate-icons.ps1",
 )
 
@@ -14897,6 +14898,7 @@ PUBLIC_GITIGNORE_RULES = [
     "launcher/**/bin/",
     "launcher/**/obj/",
     "launcher/**/TestResults/",
+    "launcher/dist/",
     "app/android/key.properties",
     "*.jks",
     "*.keystore",

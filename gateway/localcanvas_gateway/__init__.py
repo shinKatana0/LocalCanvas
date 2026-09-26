@@ -16,6 +16,6 @@ The version reported by ``GET /api/v1/info`` as ``gateway_version``.  It is
 declared here and read from here by the packaging metadata's single source.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = ["__version__"]
