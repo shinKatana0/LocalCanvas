@@ -1,4 +1,4 @@
-#Requires -Version 7
+#requires -Version 7.0
 <#
 .SYNOPSIS
     Regenerates every .ico resource the launcher ships, from code -- no image

@@ -777,6 +777,13 @@ HELPER_SCRIPTS = (
     "comfy/lib/Bootstrap.ps1", "comfy/lib/Doctor.ps1", "comfy/lib/Models.ps1",
     "scripts/tests/comfy_syntax_tree.ps1",
 )
+#: Tracked .ps1 files that are maintainer tools: run by someone working on this
+#: repository (never by a user, never dot-sourced), outside scripts/ and comfy/.
+#: Each carries ENTRY_SCRIPT_REQUIRES on its first line like an entry script,
+#: but none prints the entry banner, so the entry-script run tests skip them.
+MAINTAINER_SCRIPTS = (
+    "launcher/tools/generate-icons.ps1",
+)
 
 
 def flattened_console_text(text):
@@ -15506,7 +15513,7 @@ class PowerShellVersionGateTests(unittest.TestCase):
         below is that hole, held open.
         """
         found = sorted(path.relative_to(REPO).as_posix() for path in powershell_sources())
-        self.assertEqual(sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS), found)
+        self.assertEqual(sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS + MAINTAINER_SCRIPTS), found)
 
     def test_git_is_what_answers_and_it_sees_outside_scripts_and_comfy(self):
         """The list really comes from git, and reaches the repository root.
@@ -15521,7 +15528,7 @@ class PowerShellVersionGateTests(unittest.TestCase):
         self.assertIsNotNone(
             tracked, "git could not list this checkout, so NOTHING here was verified")
         self.assertEqual(
-            sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS),
+            sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS + MAINTAINER_SCRIPTS),
             sorted(path.relative_to(REPO).as_posix() for path in tracked))
 
         walked = set(powershell_sources_under(SCRIPTS) + comfy_sources())
@@ -15529,7 +15536,10 @@ class PowerShellVersionGateTests(unittest.TestCase):
         # None today -- every tracked .ps1 does live under scripts/ or comfy/ --
         # so the claim that matters is the mechanism, asserted directly: a path
         # at the root is in git's answer and not in the walks'.
-        self.assertEqual([], outside, "unclassified tracked .ps1 outside the walks")
+        self.assertEqual(
+            sorted(MAINTAINER_SCRIPTS),
+            sorted(path.relative_to(REPO).as_posix() for path in outside),
+            "unclassified tracked .ps1 outside the walks")
         at_the_root = REPO / "a tool at the root.ps1"
         self.assertNotIn(at_the_root, walked)
         self.assertEqual(
@@ -15545,6 +15555,18 @@ class PowerShellVersionGateTests(unittest.TestCase):
         above it has been given a place to put more.
         """
         for name in ENTRY_SCRIPTS:
+            with self.subTest(script=name):
+                text = (REPO / name).read_text(encoding="utf-8-sig")
+                self.assertEqual(ENTRY_SCRIPT_REQUIRES, text.splitlines()[0], name)
+                self.assertEqual(
+                    [ENTRY_SCRIPT_REQUIRES],
+                    [line.strip() for line in text.splitlines()
+                     if re.match(r"(?i)^\s*#requires\b", line)], name)
+
+    def test_every_maintainer_script_carries_the_gate_on_its_very_first_line(self):
+        """The same first-line rule as the entry scripts, for the maintainer tools."""
+        self.assertTrue(MAINTAINER_SCRIPTS, "no maintainer script is listed to check")
+        for name in MAINTAINER_SCRIPTS:
             with self.subTest(script=name):
                 text = (REPO / name).read_text(encoding="utf-8-sig")
                 self.assertEqual(ENTRY_SCRIPT_REQUIRES, text.splitlines()[0], name)
