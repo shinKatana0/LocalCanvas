@@ -26359,9 +26359,11 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         """
         for label, shadow, said, fix in self.UNIDENTIFIED_LAUNCH_CAUSES:
             with self.subTest(cause=label):
-                for stale in (self.comfy_marker, self.gateway_marker):
-                    if stale.exists():
-                        stale.unlink()
+                # The markers are kept, not cleared: the teardown ends every PID
+                # they name, so a child a failing subtest left behind is still
+                # accounted for. What this subtest launched is what is new.
+                comfy_before = set(self.comfy_launched_pids())
+                gateway_before = set(self.launched_gateway_pids())
                 self.write_config()
                 copied = self.copy_scripts_with(shadow, "comfy {}".format(label))
 
@@ -26385,11 +26387,11 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
                 # Nothing recorded, the child gone, and no gateway launched.
                 self.assertIsNone(self.read_pid_file("comfy"), output)
                 self.assertIsNone(self.read_pid_file("gateway"), output)
-                launched = self.comfy_launched_pids()
+                launched = [pid for pid in self.comfy_launched_pids() if pid not in comfy_before]
                 self.assertEqual(1, len(launched), output)
                 self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
                                 "the ComfyUI this run launched is still running with no record")
-                self.assertEqual([], self.launched_gateway_pids(), output)
+                self.assertEqual(gateway_before, set(self.launched_gateway_pids()), output)
                 self.assertLess(took, SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS + 60,
                                 output)
 
@@ -26424,8 +26426,7 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         """
         for label, shadow, said, fix in self.UNIDENTIFIED_LAUNCH_CAUSES:
             with self.subTest(cause=label):
-                if self.gateway_marker.exists():
-                    self.gateway_marker.unlink()
+                gateway_before = set(self.launched_gateway_pids())
                 self.write_config()
                 copied = self.copy_scripts_with(shadow, "gateway {}".format(label))
 
@@ -26442,7 +26443,7 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
                 self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
                 self.assertEqual("failed", document["gateway"]["status"])
                 self.assertIsNone(self.read_pid_file("gateway"))
-                launched = self.launched_gateway_pids()
+                launched = [pid for pid in self.launched_gateway_pids() if pid not in gateway_before]
                 self.assertEqual(1, len(launched), output)
                 self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
                                 "the gateway this run launched is still running with no record")
