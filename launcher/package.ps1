@@ -172,6 +172,14 @@ function Get-LcPackageVersion {
     return "$version".Trim()
 }
 
+# Dot-sourcing (`. launcher\package.ps1`) defines the two functions above and
+# runs nothing else -- how a self-test exercises Test-LcPackageEntryAllowed and
+# Test-LcPackageEntryForbidden against a deliberately planted forbidden entry
+# without publishing, staging or zipping anything. An ordinary run
+# (`pwsh -File launcher\package.ps1`) is unaffected: InvocationName is then the
+# script's own path, never the dot.
+if ($MyInvocation.InvocationName -eq '.') { return }
+
 # ---------------------------------------------------------------------------
 # The run
 # ---------------------------------------------------------------------------
