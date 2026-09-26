@@ -2,7 +2,7 @@ using LocalCanvas.Launcher.Core;
 
 namespace LocalCanvas.Launcher.Tests;
 
-/// <summary>The exact tooltip strings the brief names, and their length bound.</summary>
+/// <summary>The exact specified tooltip strings, and their length bound.</summary>
 public sealed class TooltipTests
 {
     [Fact]

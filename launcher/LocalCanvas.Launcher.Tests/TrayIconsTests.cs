@@ -5,7 +5,7 @@ namespace LocalCanvas.Launcher.Tests;
 
 /// <summary>
 /// The tray-state icons: which resource each <see cref="LauncherState"/>
-/// maps to, and that states told apart in the brief actually differ in the
+/// maps to, and that states told apart in the specification actually differ in the
 /// pixels drawn -- not only in a colour a test could not tell from a simple
 /// recolour of the very same glyph.
 /// </summary>
@@ -38,10 +38,10 @@ public sealed class TrayIconsTests : IDisposable
     [Fact]
     public void Gateway_down_and_a_startup_Failure_render_pixel_for_pixel_identical()
     {
-        // A startup Failure is not named in the brief's icon list; it means
+        // A startup Failure has no icon of its own in the specified list; it means
         // the same thing to the user as Gateway down -- LocalCanvas cannot be
         // used from the phone -- so it shares that icon rather than adding an
-        // eighth glyph the brief never asked for.
+        // eighth glyph the specification does not call for.
         AssertIdenticalPixels(_icons.IconFor(LauncherState.GatewayDown).ToBitmap(), _icons.IconFor(LauncherState.Failed).ToBitmap());
     }
 

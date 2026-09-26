@@ -83,7 +83,7 @@ internal sealed class StatusWindow : Form
         // must be visible without scrolling or tabbing past everything else
         // when the Gateway is down (it is hidden the rest of the time; see
         // Apply). A row further down would put it below the fold under the
-        // window's own fixed size, the defect reported against round three.
+        // window's own fixed size.
         var rows = new Control[]
         {
             _gatewayHeader, _gatewayStatus, _restart, _endpoint, _copyAddress, _qrImage, _qrFallback,
