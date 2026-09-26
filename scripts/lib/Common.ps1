@@ -1881,6 +1881,177 @@ function Get-LcPortOccupant {
 }
 
 # --------------------------------------------------------------------------
+# Questions asked of Windows through WMI / CIM
+# --------------------------------------------------------------------------
+#
+# Get-CimInstance, and the Get-Net* / Get-DnsClient* cmdlets that are CIM
+# underneath, wait on a Windows service (WMI) that answers when it answers. A
+# cold or wedged provider can take minutes or never reply, and a call with no
+# bound of its own then stalls whatever made it: start.ps1 on its ownership
+# record, stop.ps1 and status.ps1 on their ownership check -- and with them the
+# tray launcher's start, restart and Exit.
+#
+# So every such read goes through Invoke-LcBoundedSystemQuery, under this one
+# bound. A read that is not answered in time is an unanswered read -- for the
+# ownership check that is "identity unreadable", which proves nothing and
+# deletes nothing -- and the script carries on.
+#
+# WHY A CHILD PROCESS, and not the two cheaper candidates, both measured:
+#
+#   * -OperationTimeoutSec on its own is a request to the WMI side. Whether a
+#     provider that has stopped answering honours it could not be shown here,
+#     and a bound nobody has seen hold is not a bound. It is still passed, so
+#     a provider that does honour it gives up on its own.
+#   * a second runspace in this process returns control on time, but the
+#     process can then no longer exit: PowerShell waits at exit, and in
+#     Dispose, for the pipeline still stuck in the call (measured with pwsh
+#     7.6: exit delayed by the full length of the stalled call, for a
+#     runspace, a runspace pool and a thread job alike). A start.ps1 that has
+#     printed its result and never exits is the same hang.
+#
+# A child process can be ended -- by the handle this call holds, and nothing
+# else. The price is starting one PowerShell per read (about 1.5 s, measured
+# on the development machine), which is why the reads are few.
+$script:SystemQueryTimeoutSeconds = 15
+
+# Marks the one line of the child's standard output that carries the answer,
+# so nothing else the child prints can be mistaken for it.
+$script:SystemQueryAnswerMarker = 'LOCALCANVAS-SYSTEM-QUERY-ANSWER:'
+
+function Get-LcSystemQueryHost {
+    <#
+        The PowerShell executable a bounded query runs in: the one running
+        this script. Asked of the process itself, and of $PSHOME when this
+        PowerShell is hosted by some other program.
+    #>
+    $path = ''
+    try { $path = [string][System.Environment]::ProcessPath } catch { $path = '' }
+    if ($path -and ((Split-Path -Leaf $path) -in @('pwsh.exe', 'powershell.exe'))) { return $path }
+    $leaf = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+    return (Join-Path $PSHOME $leaf)
+}
+
+function Invoke-LcBoundedSystemQuery {
+    <#
+        Run one WMI/CIM-backed read, and give up on it after
+        $script:SystemQueryTimeoutSeconds.
+
+        $Query is run in a child PowerShell, with each entry of $Arguments as
+        a variable of that name and $SystemQueryTimeoutSeconds set to the
+        bound (for -OperationTimeoutSec). What it outputs comes back as data:
+        it has to project what it read into plain values -- strings and
+        numbers -- because the objects themselves cannot cross a process.
+
+        A read that fails throws, with the child's own message and error
+        category. A read that is not answered in time throws a
+        System.TimeoutException -- "Windows did not answer <What> within 15 s"
+        -- after the child has been ended by the handle this call holds.
+
+        A command the query names that is defined in this session as a plain
+        function (not one from a module) is defined in the child as well, so
+        the query runs with the same commands the caller would have run.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$What,
+        [Parameter(Mandatory)][scriptblock]$Query,
+        [System.Collections.IDictionary]$Arguments = @{}
+    )
+
+    $seconds = $script:SystemQueryTimeoutSeconds
+    $values = [ordered]@{}
+    foreach ($key in @($Arguments.Keys)) { $values[[string]$key] = $Arguments[$key] }
+    $argumentText = [Convert]::ToBase64String(
+        [System.Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $values -Depth 4 -Compress)))
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    $lines.Add('$ErrorActionPreference = ''Stop''')
+    $lines.Add('$ProgressPreference = ''SilentlyContinue''')
+    $lines.Add('$WarningPreference = ''SilentlyContinue''')
+    $lines.Add('$InformationPreference = ''SilentlyContinue''')
+    $lines.Add("`$SystemQueryTimeoutSeconds = $([int]$seconds)")
+    $lines.Add("`$lcArguments = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$argumentText')) | ConvertFrom-Json")
+    $lines.Add('foreach ($lcArgument in @($lcArguments.PSObject.Properties)) { Set-Variable -Name $lcArgument.Name -Value $lcArgument.Value }')
+
+    $named = @($Query.Ast.FindAll({
+                param($node)
+                $node -is [System.Management.Automation.Language.CommandAst]
+            }, $true) |
+            ForEach-Object { $_.GetCommandName() } |
+            Where-Object { $_ } |
+            Sort-Object -Unique)
+    foreach ($name in $named) {
+        # The function drive, not Get-Command: it looks only at what is
+        # already defined, and never loads a module to answer.
+        $defined = Get-Item -LiteralPath "function:$name" -ErrorAction SilentlyContinue
+        if ($defined -and -not $defined.ModuleName) {
+            $lines.Add("function $name {")
+            $lines.Add([string]$defined.Definition)
+            $lines.Add('}')
+        }
+    }
+
+    $lines.Add('try {')
+    $lines.Add('    $lcOutput = @(& {')
+    $lines.Add($Query.ToString())
+    $lines.Add('    })')
+    $lines.Add('    $lcAnswer = [ordered]@{ ok = $true; output = $lcOutput }')
+    $lines.Add('} catch {')
+    $lines.Add('    $lcAnswer = [ordered]@{ ok = $false; message = "$($_.Exception.Message)".Trim(); category = "$($_.CategoryInfo.Category)" }')
+    $lines.Add('}')
+    $lines.Add('$lcJson = ConvertTo-Json -InputObject $lcAnswer -Depth 6 -Compress')
+    $lines.Add("'$($script:SystemQueryAnswerMarker)' + [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(`$lcJson))")
+
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes(($lines -join "`n")))
+    $probe = Invoke-LcExecutableProbe -FilePath (Get-LcSystemQueryHost) `
+        -Arguments @('-NoProfile', '-NonInteractive', '-NoLogo', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $encoded) `
+        -Component "Windows ($What)" -TimeoutSeconds $seconds
+
+    if ($probe.TimedOut) {
+        $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new(
+                [System.TimeoutException]::new("Windows did not answer $What within $seconds s"),
+                'LocalCanvas.SystemQueryTimedOut',
+                [System.Management.Automation.ErrorCategory]::OperationTimeout,
+                $What))
+    }
+
+    $answer = $null
+    $answerLine = @("$($probe.StandardOutput)" -split "`r?`n" |
+            Where-Object { $_.StartsWith($script:SystemQueryAnswerMarker) }) | Select-Object -Last 1
+    if ($answerLine) {
+        try {
+            $answer = [System.Text.Encoding]::UTF8.GetString(
+                [Convert]::FromBase64String($answerLine.Substring($script:SystemQueryAnswerMarker.Length).Trim())) |
+                ConvertFrom-Json
+        } catch {
+            $answer = $null
+        }
+    }
+    if ($null -eq $answer) {
+        $said = @("$($probe.StandardError)" -split "`r?`n" | Where-Object { $_ -and $_.Trim() }) | Select-Object -First 1
+        $message = if ($probe.Failure) { $probe.Failure } else { "$What gave no answer (exit code $($probe.ExitCode))" }
+        if ($said) { $message = "$message`: $("$said".Trim())" }
+        $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new(
+                [System.InvalidOperationException]::new($message),
+                'LocalCanvas.SystemQueryUnanswered',
+                [System.Management.Automation.ErrorCategory]::NotSpecified,
+                $What))
+    }
+    if (-not $answer.ok) {
+        # The category survives the crossing: a caller decides by it, never by
+        # the message, which is localized.
+        $category = [string]$answer.category -as [System.Management.Automation.ErrorCategory]
+        if ($null -eq $category) { $category = [System.Management.Automation.ErrorCategory]::NotSpecified }
+        $PSCmdlet.ThrowTerminatingError([System.Management.Automation.ErrorRecord]::new(
+                [System.InvalidOperationException]::new([string]$answer.message),
+                'LocalCanvas.SystemQueryFailed',
+                $category,
+                $What))
+    }
+    foreach ($item in @($answer.output)) { $item }
+}
+
+# --------------------------------------------------------------------------
 # Process ownership
 # --------------------------------------------------------------------------
 #
@@ -1930,6 +2101,13 @@ function Get-LcProcessIdentity {
         Returns Readable=$false and a Reason when the identity cannot be read
         -- for a protected process, for instance. "Could not read" never counts
         as "matches".
+
+        The query is bounded (Invoke-LcBoundedSystemQuery): when Windows does
+        not answer within $script:SystemQueryTimeoutSeconds the identity is
+        unreadable, TimedOut is $true and the Reason names WMI and the bound.
+        QueryFailed is $true whenever the query itself gave no answer -- timed
+        out or failed -- as opposed to answering that the process has no
+        readable executable or start time.
     #>
     param([Parameter(Mandatory)][int]$ProcessId)
 
@@ -1939,13 +2117,33 @@ function Get-LcProcessIdentity {
         StartTimeUtc   = $null
         CommandLine    = ''
         Reason         = ''
+        QueryFailed    = $false
+        TimedOut       = $false
+        QueryError     = ''
     }
 
+    # Projected to plain values in the query: the CIM object itself cannot
+    # cross into this process. CreationDate becomes UTC ticks there, from the
+    # same field and by the same conversion as before.
     $info = $null
     try {
-        $info = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction Stop
+        $info = @(Invoke-LcBoundedSystemQuery -What 'a process query (WMI)' -Arguments @{ ProcessId = $ProcessId } -Query {
+                Get-CimInstance -ClassName Win32_Process -Filter "ProcessId=$ProcessId" -OperationTimeoutSec $SystemQueryTimeoutSeconds -ErrorAction Stop |
+                    ForEach-Object {
+                        $ticks = [long]0
+                        if ($_.CreationDate) { $ticks = ([datetime]$_.CreationDate).ToUniversalTime().Ticks }
+                        [pscustomobject]@{
+                            ExecutablePath = [string]$_.ExecutablePath
+                            CommandLine    = [string]$_.CommandLine
+                            CreationTicks  = $ticks
+                        }
+                    }
+            }) | Select-Object -First 1
     } catch {
-        $identity.Reason = "the identity of PID $ProcessId could not be read: $("$($_.Exception.Message)".Trim())"
+        $identity.QueryFailed = $true
+        $identity.TimedOut = ($_.Exception -is [System.TimeoutException])
+        $identity.QueryError = "$($_.Exception.Message)".Trim()
+        $identity.Reason = "the identity of PID $ProcessId could not be read: $($identity.QueryError)"
         return $identity
     }
     if (-not $info) {
@@ -1962,7 +2160,8 @@ function Get-LcProcessIdentity {
 
     $started = $null
     try {
-        if ($info.CreationDate) { $started = ([datetime]$info.CreationDate).ToUniversalTime() }
+        $ticks = [long]$info.CreationTicks
+        if ($ticks -gt 0) { $started = [datetime]::new($ticks, [System.DateTimeKind]::Utc) }
     } catch {
         $started = $null
     }
@@ -1988,13 +2187,24 @@ function Save-LcOwnedProcess {
         # carries its instance id and published endpoint here; a record
         # without them -- one written before they existed -- still loads,
         # because nothing in the ownership decision reads them.
-        [System.Collections.IDictionary]$Extra = $null
+        [System.Collections.IDictionary]$Extra = $null,
+        # Throw instead of writing a record that can never prove anything,
+        # when the identity query itself gave no answer (Windows did not
+        # answer in time, or the query failed). For a caller that can still
+        # undo its launch by the handle it holds, which is better than a live
+        # process nothing will ever be able to stop.
+        [switch]$FailWhenUnanswered
     )
     # Recorded from the SAME source the verification reads. An asymmetry here
     # is what turned a healthy process into an unrecognised one: the launch
     # side read the right value and the verification side read a module path,
     # so the two could never agree (T-0088).
     $identity = Get-LcProcessIdentity -ProcessId $Process.Id
+    if ($FailWhenUnanswered -and $identity.QueryFailed) {
+        $message = "$($identity.QueryError), so the identity of PID $($Process.Id) could not be recorded."
+        if ($identity.TimedOut) { throw [System.TimeoutException]::new($message) }
+        throw [System.InvalidOperationException]::new($message)
+    }
     $imagePath = ''
     $startUtc = $null
     if ($identity.Readable) {
@@ -2252,10 +2462,19 @@ function Get-LcLanAddress {
     <#
         Read-only. Returns the machine's most likely LAN IPv4 address, or
         $null. Nothing here changes an adapter, a route or a firewall.
+
+        The adapter read is bounded (Invoke-LcBoundedSystemQuery). When
+        Windows does not answer it in time this says so, naming the bound,
+        and falls back to DNS exactly as it does when the read fails.
     #>
     try {
         if (Get-Command Get-NetIPAddress -ErrorAction SilentlyContinue) {
-            $candidate = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+            $candidate = Invoke-LcBoundedSystemQuery -What 'a network address query' -Query {
+                Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop |
+                    ForEach-Object {
+                        [pscustomobject]@{ IPAddress = [string]$_.IPAddress; PrefixOrigin = [string]$_.PrefixOrigin }
+                    }
+            } |
                 Where-Object {
                     $_.IPAddress -notlike '127.*' -and
                     $_.IPAddress -notlike '169.254.*' -and
@@ -2266,7 +2485,11 @@ function Get-LcLanAddress {
             if ($candidate) { return $candidate.IPAddress }
         }
     } catch {
-        # Fall through to DNS.
+        # Fall through to DNS -- saying so when the reason is a Windows that
+        # did not answer, because that costs the user the bound in time.
+        if ($_.Exception -is [System.TimeoutException]) {
+            Write-LcWarn "Windows did not answer a network address query within $($script:SystemQueryTimeoutSeconds) s; the LAN address is taken from DNS instead."
+        }
     }
     try {
         $addresses = [System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName())

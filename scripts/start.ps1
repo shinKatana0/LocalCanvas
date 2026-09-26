@@ -891,11 +891,17 @@ try {
         # -- stop this gateway later. A gateway running without one is a
         # gateway nothing can stop, and the next start then fails the port
         # check for ever. So a record that cannot be written undoes the launch.
+        # So does one that could be written but could never prove anything:
+        # when Windows does not answer the identity query in time, the record
+        # would name a PID with no executable and no start time to check it
+        # by, and a later stop would have to leave that gateway alone.
         $gatewayRecordPath = Get-LcPidFilePath -Role 'gateway'
         $recordSaveError = $null
+        $recordSaveTimedOut = $false
         try {
             $gatewayRecordPath = Save-LcOwnedProcess -Role 'gateway' -Process $gatewayProcess `
                 -Endpoint $endpoints.GatewayBaseUrl -CommandLine "$python $gatewayCommandLine" `
+                -FailWhenUnanswered `
                 -Extra ([ordered]@{
                     instance_id        = $instanceId
                     published_endpoint = $endpoint.Url
@@ -907,6 +913,7 @@ try {
             }
         } catch {
             $recordSaveError = "$($_.Exception.Message)".Trim()
+            $recordSaveTimedOut = ($_.Exception -is [System.TimeoutException])
         }
         if ($null -ne $recordSaveError) {
             $launchedPid = $gatewayProcess.Id
@@ -921,8 +928,13 @@ try {
                 if ($comfyOwned) {
                     $detail += "ComfyUI (PID $comfyPid) was left running; scripts\stop.ps1 will stop it."
                 }
+                $fix = "Make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath), then start again."
+                if ($recordSaveTimedOut) {
+                    $fix = ('Start again. If Windows keeps not answering process queries, its management ' +
+                        'service (WMI) is stuck; restarting Windows usually clears it.')
+                }
                 Write-LcFailure -What "The gateway's ownership record could not be written" -Detail $detail `
-                    -Fix "Make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath), then start again."
+                    -Fix $fix
             } else {
                 # The one outcome with no safe cleanup left: a live gateway
                 # that no record describes. Said as loudly as this can say
