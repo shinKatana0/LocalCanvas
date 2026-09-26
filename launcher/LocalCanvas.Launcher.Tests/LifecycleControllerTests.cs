@@ -138,6 +138,10 @@ public sealed class StartupTests
         Assert.Single(harness.Runtime.Calls, call => call.Names("start.ps1", "-Component", "Gateway"));
         Assert.Equal("Workflows: 4 (check did not complete)", harness.Model.WorkflowsLine);
         Assert.Contains("The sources configuration is invalid", harness.Model.Problem);
+        // Attention reached through a problem, not a count: the tooltip must
+        // still say something happened, not read as a plain "Ready" beside
+        // the Attention triangle icon.
+        Assert.Equal("LocalCanvas — Ready (workflow check did not complete)", harness.Model.Tooltip);
     }
 
     [Fact]
@@ -368,6 +372,41 @@ public sealed class HealthTests
     }
 
     [Fact]
+    public async Task One_balloon_is_shown_on_entering_Gateway_down_not_on_every_failed_poll()
+    {
+        await using var harness = new ControllerHarness();
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+
+        harness.Runtime.LiveInstance = null;
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        Assert.Equal(LauncherState.GatewayDown, harness.Model.State);
+        Assert.Equal(1, harness.Prompts.Messages.Count(message => message.Kind == MessageKind.GatewayDown));
+
+        // Still down: three more failed polls raise no further balloon.
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        Assert.Equal(1, harness.Prompts.Messages.Count(message => message.Kind == MessageKind.GatewayDown));
+        var only = harness.Prompts.Messages.Single(message => message.Kind == MessageKind.GatewayDown);
+        Assert.Equal("Gateway down", only.Title);
+        Assert.Equal(
+            "The LocalCanvas Gateway stopped. Right-click the tray icon and choose Restart Gateway.",
+            only.Text);
+
+        // Recovers, then goes down again: a second, distinct entry gets its own balloon.
+        var live = FakeRuntime.InstanceId(1);
+        harness.Runtime.LiveInstance = live;
+        await controller.TickHealthAsync();
+        Assert.Equal(LauncherState.Ready, harness.Model.State);
+        harness.Runtime.LiveInstance = null;
+        await controller.TickHealthAsync();
+        await controller.TickHealthAsync();
+        Assert.Equal(LauncherState.GatewayDown, harness.Model.State);
+        Assert.Equal(2, harness.Prompts.Messages.Count(message => message.Kind == MessageKind.GatewayDown));
+    }
+
+    [Fact]
     public async Task ComfyUI_going_down_is_a_status_line_and_not_a_state()
     {
         await using var harness = new ControllerHarness();
@@ -555,7 +594,7 @@ public sealed class SyncCommandTests
         var summary = Assert.Single(harness.Prompts.Messages);
         Assert.Equal(MessageKind.SyncSummary, summary.Kind);
         Assert.Equal(LauncherText.SyncCompleted, summary.Title);
-        Assert.Equal("Updated: 2, Needs review: 1", summary.Text);
+        Assert.Equal("Updated: 2 · Needs review: 1", summary.Text);
         Assert.Contains(LauncherState.Syncing, harness.States);
     }
 
@@ -569,7 +608,7 @@ public sealed class SyncCommandTests
         Assert.True(await controller.RequestSyncWorkflowsAsync());
         Assert.Equal(["sync-workflows.ps1 -Json"], harness.Runtime.CallNames.Skip(before));
         Assert.Equal(LauncherState.Ready, harness.Model.State);
-        Assert.Equal("Updated: 0, Needs review: 0", Assert.Single(harness.Prompts.Messages).Text);
+        Assert.Equal("Updated: 0 · Needs review: 0", Assert.Single(harness.Prompts.Messages).Text);
     }
 
     [Fact]

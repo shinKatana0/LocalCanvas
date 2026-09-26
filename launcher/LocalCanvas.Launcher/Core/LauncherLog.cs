@@ -37,12 +37,19 @@ public sealed class LauncherLog : ILauncherLog
 
     public string Location { get; }
 
-    public static string DefaultPath(string root)
+    /// <summary>
+    /// <c>.runtime</c> under the LocalCanvas folder, or <c>LOCALCANVAS_RUNTIME_DIR</c>
+    /// when the scripts' own runtime directory has been moved for them --
+    /// the one place the log, the Gateway's records and a generated pairing
+    /// QR all live.
+    /// </summary>
+    public static string RuntimeDirectory(string root)
     {
         var moved = Environment.GetEnvironmentVariable("LOCALCANVAS_RUNTIME_DIR");
-        var directory = string.IsNullOrEmpty(moved) ? Path.Combine(root, ".runtime") : moved;
-        return Path.Combine(directory, "launcher.log");
+        return string.IsNullOrEmpty(moved) ? Path.Combine(root, ".runtime") : moved;
     }
+
+    public static string DefaultPath(string root) => Path.Combine(RuntimeDirectory(root), "launcher.log");
 
     public void Write(string message)
     {

@@ -54,17 +54,35 @@ public sealed record TrayViewModel(
     string? PublishedEndpoint,
     string? InstanceId,
     string? ComfyUrl,
-    string LogPath)
+    string LogPath,
+    int? WorkflowsReady = null,
+    int? WorkflowsNeedALook = null)
 {
     /// <summary>The three status lines of the tray menu, in order.</summary>
     public IReadOnlyList<string> StatusLines => [GatewayLine, ComfyLine, WorkflowsLine];
 
-    public static string StateText(LauncherState state) => state switch
+    /// <param name="attentionCount">
+    /// How many workflows need a look, used only for <see cref="LauncherState.Attention"/>:
+    /// the Gateway is Ready, so the word said is still "Ready", with the count
+    /// alongside it -- never the separate word "Attention", which names no
+    /// state the Gateway line or the tray menu ever shows either.
+    /// </param>
+    /// <param name="workflowProblem">
+    /// Attention was entered by a failed workflow check or sync (no count is
+    /// known) rather than by a positive count of workflows needing a look.
+    /// Also said in words: <see cref="LauncherState.Attention"/> is reached
+    /// only when one of the two is true (docs the state means "something
+    /// about workflows needs a look"), so a plain "Ready" here would say
+    /// nothing happened when something did.
+    /// </param>
+    public static string StateText(LauncherState state, int? attentionCount = null, bool workflowProblem = false) => state switch
     {
         LauncherState.Starting => "Starting…",
         LauncherState.Ready => "Ready",
         LauncherState.Syncing => "Syncing workflows…",
-        LauncherState.Attention => "Workflows need attention",
+        LauncherState.Attention => attentionCount is > 0
+            ? $"Ready ({Plural(attentionCount.Value, "workflow")} need{(attentionCount == 1 ? "s" : string.Empty)} a look)"
+            : workflowProblem ? "Ready (workflow check did not complete)" : "Ready",
         LauncherState.Restarting => "Restarting the Gateway…",
         LauncherState.GatewayDown => "Gateway down",
         LauncherState.Stopping => "Exiting…",
@@ -72,5 +90,9 @@ public sealed record TrayViewModel(
         _ => state.ToString(),
     };
 
-    public static string TooltipFor(LauncherState state) => "LocalCanvas — " + StateText(state);
+    public static string TooltipFor(LauncherState state, int? attentionCount = null, bool workflowProblem = false) =>
+        "LocalCanvas — " + StateText(state, attentionCount, workflowProblem);
+
+    private static string Plural(int count, string noun) =>
+        $"{count.ToString(System.Globalization.CultureInfo.InvariantCulture)} {noun}" + (count == 1 ? string.Empty : "s");
 }

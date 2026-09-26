@@ -19,7 +19,8 @@ start reported.
 | Path | What it is |
 |---|---|
 | `LocalCanvas.Launcher/Core/` | Everything with a decision in it, free of Windows Forms: the script runner, the health probe, the lifecycle controller and its `TrayViewModel`. |
-| `LocalCanvas.Launcher/Shell/` | The tray shell: the icon, its menu, the dialogs and a placeholder status window, all rendering the view model. |
+| `LocalCanvas.Launcher/Shell/` | The tray shell: the state icons, the menu, the dialogs and the status window, all rendering the view model, plus two small OS conveniences (opening the logs folder, the shutdown-block window) that touch no lifecycle logic. |
+| `LocalCanvas.Launcher/Resources/Icons/` | The `.ico` files the tray, the status window and the exe itself use -- generated, not drawn by hand; see `launcher/tools/generate-icons.ps1`. |
 | `LocalCanvas.Launcher.Tests/` | xUnit tests: the controller against a fake runtime, the health probe against real loopback listeners, the script runner against real PowerShell 7, two real launches, and end-to-end runs on the real scripts with their stub Gateway and ComfyUI. |
 
 ## Build, test, publish
@@ -80,3 +81,18 @@ folder must contain `scripts\start.ps1`. It is not a user setting.
   told what is, or may still be, running.
 - Log: `.runtime\launcher.log` (or under `LOCALCANVAS_RUNTIME_DIR`), capped at
   1 MB with one previous generation kept. Nothing is sent anywhere.
+- The tray icon is told apart by shape as well as colour, not only colour: a
+  green disc with a check (Ready), an amber disc with a spinner arc (Starting,
+  Restarting), an amber disc with two circular arrows (Syncing), an
+  amber/yellow triangle with "!" (Attention), a red disc with "x" (Gateway
+  down, and a startup Failure -- both mean the phone cannot use LocalCanvas
+  right now), and a plain grey disc (Stopping). Restart Gateway is shown bold
+  in the tray menu while the Gateway is down. One balloon is shown on
+  entering the Gateway-down state, not on every failed health poll after it.
+- The status window shows the Gateway's published endpoint with a Copy
+  address button and a pairing QR image, generated on demand by the gateway
+  package's own `qr` command run hidden through the same PowerShell seam as
+  the configuration read above; a QR that could not be produced falls back to
+  the address on its own. Restart Gateway appears there only while the
+  Gateway is down. Open logs folder opens `.runtime` in Explorer through the
+  shell's own `ShellExecute` -- not a process LocalCanvas has to account for.

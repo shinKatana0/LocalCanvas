@@ -47,6 +47,7 @@ internal sealed class WinFormsPrompts : IUserPrompts
                     return true;
                 }, cancellationToken);
             case MessageKind.SyncSummary:
+            case MessageKind.GatewayDown:
                 Post(() => _balloon?.Invoke(message));
                 return Task.CompletedTask;
             default:

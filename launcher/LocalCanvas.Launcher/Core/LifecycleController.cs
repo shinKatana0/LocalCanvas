@@ -851,6 +851,11 @@ public sealed class LifecycleController : IAsyncDisposable
                 _gatewayHealthy = false;
                 _problem = gateway.Reason;
                 _log.Write($"health: Gateway DOWN after {_consecutiveFailures} failed probes");
+                // One balloon for this entry into GatewayDown, not one per
+                // failed poll: TellAsync does not block the health queue item
+                // (GatewayDown, like SyncSummary, is posted and not waited for).
+                await TellAsync(new LauncherMessage(MessageKind.GatewayDown, TrayViewModel.StateText(LauncherState.GatewayDown), LauncherText.GatewayWentDown, null))
+                    .ConfigureAwait(false);
             }
         }
         Publish();
@@ -1527,7 +1532,7 @@ public sealed class LifecycleController : IAsyncDisposable
                          && _state is LauncherState.Ready or LauncherState.Attention or LauncherState.GatewayDown;
         return new TrayViewModel(
             State: shown,
-            Tooltip: TrayViewModel.TooltipFor(shown),
+            Tooltip: TrayViewModel.TooltipFor(shown, _attentionCount, _workflowProblem is not null),
             GatewayLine: "Gateway: " + GatewayStatus(shown),
             ComfyLine: "ComfyUI: " + ComfyStatus(),
             WorkflowsLine: "Workflows: " + WorkflowsStatus(),
@@ -1540,7 +1545,9 @@ public sealed class LifecycleController : IAsyncDisposable
             PublishedEndpoint: _publishedEndpoint,
             InstanceId: _expectedInstance,
             ComfyUrl: _comfyUrl?.ToString(),
-            LogPath: _log.Location);
+            LogPath: _log.Location,
+            WorkflowsReady: _workflowCount,
+            WorkflowsNeedALook: _attentionCount);
     }
 
     private string GatewayStatus(LauncherState state) => state switch
