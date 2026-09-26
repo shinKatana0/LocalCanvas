@@ -1,0 +1,102 @@
+# The Windows package: one LocalCanvas-<version>-windows-x64.zip a user
+# downloads, extracts and runs.
+#
+# WHAT THIS PRODUCES. launcher\package.ps1, run exactly as a maintainer runs
+# it locally: `dotnet publish` the launcher against the win-x64 profile,
+# assemble the allowlist described there into a zip, then verify the zip it
+# just wrote by reading the archive back. Nothing here duplicates that logic
+# -- this workflow calls the script and reports what it printed.
+#
+# WHY THIS IS NOT A STEP IN `ci.yml`. That workflow answers one question --
+# is the tree green -- in about as long as its slowest job takes. A publish
+# and a zip answer a different one, so this runs beside it, on its own
+# trigger, exactly the way apk.yml (the Android equivalent) does.
+#
+# SIGNING: none. This project holds no code-signing certificate, so the exe
+# inside the zip is unsigned; an unsigned exe downloaded from the internet is
+# what Windows SmartScreen's "Windows protected your PC" warning is for
+# (More info -> Run anyway), and that is expected, not a bug in this workflow.
+#
+# Nothing here uses a secret, creates a keystore, makes a tag or a release, or
+# uploads anywhere outside this repository's own run artefacts. Like ci.yml
+# and apk.yml, it talks to no real ComfyUI, no developer's network and no
+# self-hosted machine; the only hosts it reaches are the toolchain's own.
+
+name: Windows package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-package-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    name: LocalCanvas-<version>-windows-x64.zip
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      # The checkout is clean, so package.ps1's own dirty-tree gate runs
+      # unmodified here -- no -AllowDirty, the same as a maintainer's own run
+      # on a clean clone.
+      - name: Build and verify the package
+        id: build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pwsh -File launcher\package.ps1
+          $zip = Get-ChildItem launcher\dist\LocalCanvas-*-windows-x64.zip
+          if (-not $zip) {
+            throw "package.ps1 reported success but no LocalCanvas-*-windows-x64.zip is in launcher\dist"
+          }
+          if (@($zip).Count -gt 1) {
+            throw "More than one zip matched in launcher\dist: $($zip -join ', ')"
+          }
+          "zip_name=$($zip.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "zip_path=$($zip.FullName)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Report what was built
+        shell: pwsh
+        run: |
+          $zip = Get-Item -LiteralPath '${{ steps.build.outputs.zip_path }}'
+          $hash = (Get-FileHash -LiteralPath $zip.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $lines = @(
+            "### Windows package",
+            "",
+            "**Unsigned.** This project holds no code-signing certificate. An unsigned",
+            "exe downloaded from the internet is what SmartScreen's ``Windows protected",
+            "your PC`` warning is for -- More info, then Run anyway.",
+            "",
+            "| File | Bytes | SHA-256 |",
+            "|---|---|---|",
+            "| ``$($zip.Name)`` | $($zip.Length) | ``$hash`` |"
+          )
+          Write-Host "$($zip.Name)  $($zip.Length) bytes  sha256:$hash"
+          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      # if-no-files-found: error, so a build that packaged nothing and an
+      # upload that matched nothing are never mistaken for each other.
+      #
+      # retention-days: 14, the same policy apk.yml uses for the same reason:
+      # two weeks outlasts anyone testing the build it came from, and a fresh
+      # one is a workflow_dispatch away.
+      - name: Attach the zip to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.build.outputs.zip_name }}
+          path: ${{ steps.build.outputs.zip_path }}
+          if-no-files-found: error
+          retention-days: 14
