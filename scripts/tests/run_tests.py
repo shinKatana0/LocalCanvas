@@ -25614,10 +25614,10 @@ SYSTEM_QUERY_BOUND_VARIABLE = "SystemQueryTimeoutSeconds"
 # The two WMI calls that are deliberately NOT bounded, by file, function and
 # command. Both CHANGE the firewall, and a change abandoned at a deadline may
 # still land after the script has reported it as not made -- which would break
-# the one promise strict-lan.ps1 makes, that it never changes anything without
-# saying what it changed. Neither is reached on a machine whose WMI is not
-# answering: each runs only after Get-LcStrictLanRules, which is bounded, has
-# read the firewall.
+# the strict LAN script's promise never to change anything without saying what
+# it changed. Each runs only after Get-LcStrictLanRules, which is bounded, has
+# just read the firewall; a WMI that stops answering between the two is not
+# covered, and that is the accepted cost of not abandoning a change.
 SYSTEM_QUERY_UNBOUNDED_ALLOWED = {
     ("StrictLan.ps1", "Invoke-LcStrictLanApply", "New-NetFirewallRule"),
     ("StrictLan.ps1", "Invoke-LcStrictLanRemove", "Remove-NetFirewallRule"),
