@@ -25592,32 +25592,57 @@ def current_user_sid():
 # Every WMI/CIM call in the scripts carries the bound
 # ==========================================================================
 #
-# The rule SystemQueryBoundTests exercises, held in the source: a
-# Get-CimInstance, Get-Net* or Get-DnsClient* call -- any command that waits on
-# WMI -- appears only inside the -Query script block of
-# Invoke-LcBoundedSystemQuery, and a *-Cim* call there also asks WMI itself
+# The rule SystemQueryBoundTests exercises, held in the source: anything that
+# waits on WMI appears only inside the -Query script block of
+# Invoke-LcBoundedSystemQuery, and a CimCmdlets call there also asks WMI itself
 # for the same bound with -OperationTimeoutSec $SystemQueryTimeoutSeconds.
 #
-# Read from the PowerShell syntax tree, not by pattern: a call site renamed,
-# moved or newly added is found wherever it is, and prose about a cmdlet in a
-# comment or a message is not a call.
+# "Anything that waits on WMI" is decided by RESOLVING each command, not by its
+# spelling. Every command name in the syntax tree is looked up with Get-Command
+# -- an alias (gcim, icim, ncms) to what it stands for, a module-qualified name
+# (CimCmdlets\Get-CimInstance) to its command -- and it counts when the
+# resolved command is:
+#
+#   * from CimCmdlets (Get-CimInstance, Invoke-CimMethod, New-CimSession ...);
+#   * a cmdletization (CDXML) function -- the form every CIM-backed module
+#     takes: Net*, DnsClient, Storage (Get-Volume, Get-Disk), PnpDevice,
+#     SmbShare, PrintManagement, ScheduledTasks and the rest;
+#   * one of the few binary cmdlets that query WMI themselves
+#     (WMI_BACKED_CMDLETS: Get-ComputerInfo, Get-HotFix ...).
+#
+# The old name pattern stays as a second net, for a name this machine cannot
+# resolve (Get-WmiObject does not exist in PowerShell 7, and a module can be
+# missing on some machine). Beside the commands, a TYPE that reaches WMI counts
+# too: [wmi], [wmisearcher], [wmiclass], System.Management.* (not .Automation),
+# Microsoft.Management.Infrastructure.* -- as a cast, a static call or a
+# parameter type -- and New-Object naming one of those, or WbemScripting.
+#
+# KNOWN LIMITS, deliberately not chased: a command whose name is only known at
+# run time (`& $name`, `Invoke-Expression`, `[scriptblock]::Create(...)`), and
+# a type named only in a string handed to reflection. None of these appears in
+# the scripts, and each would be visible in review as the unusual thing it is.
 
-# The command names that wait on WMI. The Net* modules (NetTCPIP, NetSecurity,
-# NetAdapter, NetConnection ...), DnsClient and ScheduledTasks are CIM
-# underneath; *-Cim* and *-Wmi* are WMI itself.
 WMI_COMMAND = re.compile(
     r"^(?:[A-Za-z]+)-(?:Cim|Wmi|Net[A-Z]|DnsClient|ScheduledTask)", re.IGNORECASE)
 WMI_ITSELF = re.compile(r"^(?:[A-Za-z]+)-(?:Cim|Wmi)", re.IGNORECASE)
+# Binary cmdlets that query WMI inside themselves, so neither their module nor
+# their form gives them away.
+WMI_BACKED_CMDLETS = (
+    "Get-ComputerInfo", "Get-HotFix", "Get-WmiObject", "Invoke-WmiMethod", "Set-WmiInstance",
+    "Remove-WmiObject", "Register-WmiEvent", "Register-CimIndicationEvent",
+    "Restart-Computer", "Stop-Computer",
+)
 SYSTEM_QUERY_WRAPPER = "Invoke-LcBoundedSystemQuery"
 SYSTEM_QUERY_BOUND_VARIABLE = "SystemQueryTimeoutSeconds"
 
 # The two WMI calls that are deliberately NOT bounded, by file, function and
-# command. Both CHANGE the firewall, and a change abandoned at a deadline may
-# still land after the script has reported it as not made -- which would break
-# the strict LAN script's promise never to change anything without saying what
-# it changed. Each runs only after Get-LcStrictLanRules, which is bounded, has
-# just read the firewall; a WMI that stops answering between the two is not
-# covered, and that is the accepted cost of not abandoning a change.
+# (resolved) command. Both CHANGE the firewall, and a change abandoned at a
+# deadline may still land after the script has reported it as not made --
+# which would break the strict LAN script's promise never to change anything
+# without saying what it changed. Each runs only after Get-LcStrictLanRules,
+# which is bounded, has just read the firewall; a WMI that stops answering
+# between the two is not covered, and that is the accepted cost of not
+# abandoning a change.
 SYSTEM_QUERY_UNBOUNDED_ALLOWED = {
     ("StrictLan.ps1", "Invoke-LcStrictLanApply", "New-NetFirewallRule"),
     ("StrictLan.ps1", "Invoke-LcStrictLanRemove", "Remove-NetFirewallRule"),
@@ -25632,59 +25657,143 @@ SYSTEM_QUERY_REQUIRED_SITES = (
 
 WMI_CALL_SITES_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $paths = @(ConvertFrom-Json -InputObject $env:LC_WMI_LINT_PATHS)
 $pattern = $env:LC_WMI_LINT_PATTERN
+$backed = @(ConvertFrom-Json -InputObject $env:LC_WMI_LINT_BACKED)
+$wrapper = $env:LC_WMI_LINT_WRAPPER
+$typePattern = '(?i)(?:^|[^\w.])(?:(?:System\.)?Management\.(?!Automation\b)\w|Microsoft\.Management\.Infrastructure\b)|^(?:wmi|wmisearcher|wmiclass)$|WbemScripting'
+$resolved = @{}
+
+function Resolve-WmiCommand([string]$written) {
+    if ($resolved.ContainsKey($written)) { return $resolved[$written] }
+    $answer = [pscustomobject]@{ Name = $written; Wmi = $false; Why = '' }
+    $bare = $written
+    if ($bare -match '\\') { $bare = $bare.Substring($bare.LastIndexOf('\') + 1) }
+    $answer.Name = $bare
+    $command = $null
+    try { $command = Get-Command -Name $written -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    if ($null -eq $command -and $bare -ne $written) {
+        try { $command = Get-Command -Name $bare -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    }
+    $hops = 0
+    while ($command -and $command.CommandType -eq 'Alias' -and $hops -lt 8) {
+        $command = $command.ResolvedCommand
+        $hops++
+    }
+    if ($command) {
+        $answer.Name = $command.Name
+        if ($command.ModuleName -eq 'CimCmdlets') { $answer.Wmi = $true; $answer.Why = 'CimCmdlets' }
+        elseif ($command.CommandType -eq 'Function' -and
+            ("$($command.Definition)" -match '\$__cmdletization_objectModelWrapper' -or
+             ($command.Module -and "$($command.Module.ModuleType)" -eq 'Cim'))) {
+            $answer.Wmi = $true; $answer.Why = "a CIM (cmdletization) command of $($command.ModuleName)"
+        }
+    }
+    if (-not $answer.Wmi -and ($backed -contains $answer.Name)) { $answer.Wmi = $true; $answer.Why = 'queries WMI itself' }
+    if (-not $answer.Wmi -and $answer.Name -match $pattern) { $answer.Wmi = $true; $answer.Why = 'named like a WMI command' }
+    $resolved[$written] = $answer
+    return $answer
+}
+
+function Get-Placement($node) {
+    $function = ''
+    $bounded = $false
+    $at = $node.Parent
+    while ($null -ne $at) {
+        if (-not $function -and $at -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            $function = $at.Name
+        }
+        if (-not $bounded -and $at -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+            $holder = $at.Parent
+            # -Query { ... }: the block is the element after the parameter.
+            if ($holder -is [System.Management.Automation.Language.CommandAst] -and
+                $holder.GetCommandName() -eq $wrapper) {
+                $elements = $holder.CommandElements
+                $index = $elements.IndexOf($at)
+                if ($index -gt 0 -and
+                    $elements[$index - 1] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $elements[$index - 1].ParameterName -eq 'Query' -and
+                    $null -eq $elements[$index - 1].Argument) {
+                    $bounded = $true
+                }
+            }
+            # -Query:{ ... }: the block is the parameter's own argument.
+            if ($holder -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $holder.ParameterName -eq 'Query' -and
+                $holder.Parent -is [System.Management.Automation.Language.CommandAst] -and
+                $holder.Parent.GetCommandName() -eq $wrapper) {
+                $bounded = $true
+            }
+        }
+        $at = $at.Parent
+    }
+    return [pscustomobject]@{ Function = $function; Bounded = $bounded }
+}
+
 $found = @()
 foreach ($path in $paths) {
     $tokens = $null
     $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
-    $commands = $ast.FindAll({
-            param($node)
-            $node -is [System.Management.Automation.Language.CommandAst]
-        }, $true)
-    foreach ($command in $commands) {
-        $name = $command.GetCommandName()
-        if (-not $name -or $name -notmatch $pattern) { continue }
-        $function = ''
-        $bounded = $false
-        $node = $command.Parent
-        while ($null -ne $node) {
-            if (-not $function -and $node -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
-                $function = $node.Name
-            }
-            if (-not $bounded -and
-                $node -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
-                $node.Parent -is [System.Management.Automation.Language.CommandAst] -and
-                $node.Parent.GetCommandName() -eq $env:LC_WMI_LINT_WRAPPER) {
-                $elements = $node.Parent.CommandElements
-                $index = $elements.IndexOf($node)
-                if ($index -gt 0 -and
-                    $elements[$index - 1] -is [System.Management.Automation.Language.CommandParameterAst] -and
-                    $elements[$index - 1].ParameterName -eq 'Query') {
-                    $bounded = $true
+    $file = [System.IO.Path]::GetFileName($path)
+
+    foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $written = $command.GetCommandName()
+        if (-not $written) { continue }
+        $placement = $null
+        $what = Resolve-WmiCommand $written
+        if ($what.Wmi) {
+            $placement = Get-Placement $command
+            $timeout = ''
+            $elements = $command.CommandElements
+            for ($i = 0; $i -lt $elements.Count; $i++) {
+                $element = $elements[$i]
+                if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $element.ParameterName -eq 'OperationTimeoutSec') {
+                    if ($element.Argument) { $timeout = $element.Argument.Extent.Text }
+                    elseif ($i + 1 -lt $elements.Count) { $timeout = $elements[$i + 1].Extent.Text }
                 }
             }
-            $node = $node.Parent
-        }
-        $timeout = ''
-        $elements = $command.CommandElements
-        for ($i = 0; $i -lt $elements.Count; $i++) {
-            $element = $elements[$i]
-            if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
-                $element.ParameterName -eq 'OperationTimeoutSec') {
-                if ($element.Argument) { $timeout = $element.Argument.Extent.Text }
-                elseif ($i + 1 -lt $elements.Count) { $timeout = $elements[$i + 1].Extent.Text }
+            $found += [pscustomobject]@{
+                file = $file; path = $path; line = $command.Extent.StartLineNumber; kind = 'command'
+                written = $written; name = $what.Name; why = $what.Why
+                function = $placement.Function; bounded = $placement.Bounded; timeout = $timeout
             }
         }
+        # New-Object naming a WMI type or the WMI scripting COM object.
+        if ((Resolve-WmiCommand $written).Name -eq 'New-Object') {
+            foreach ($element in $command.CommandElements) {
+                if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                    $element -ne $command.CommandElements[0] -and $element.Value -match $typePattern) {
+                    $placement = Get-Placement $command
+                    $found += [pscustomobject]@{
+                        file = $file; path = $path; line = $command.Extent.StartLineNumber; kind = 'type'
+                        written = $element.Value; name = $element.Value; why = 'New-Object of a WMI type'
+                        function = $placement.Function; bounded = $placement.Bounded; timeout = ''
+                    }
+                }
+            }
+        }
+    }
+
+    $types = $ast.FindAll({
+            param($n)
+            $n -is [System.Management.Automation.Language.TypeExpressionAst] -or
+            $n -is [System.Management.Automation.Language.TypeConstraintAst]
+        }, $true)
+    foreach ($typeNode in $types) {
+        $text = $typeNode.TypeName.FullName
+        $real = ''
+        try { $reflected = $typeNode.TypeName.GetReflectionType(); if ($reflected) { $real = $reflected.FullName } } catch { $real = '' }
+        $parts = @($text) + @(([regex]::Split($text, '[\[\],\s]') | Where-Object { $_ }))
+        $hit = @($parts + @($real) | Where-Object { $_ -and $_ -match $typePattern }).Count -gt 0
+        if (-not $hit) { continue }
+        $placement = Get-Placement $typeNode
         $found += [pscustomobject]@{
-            file = [System.IO.Path]::GetFileName($path)
-            path = $path
-            line = $command.Extent.StartLineNumber
-            name = $name
-            function = $function
-            bounded = $bounded
-            timeout = $timeout
+            file = $file; path = $path; line = $typeNode.Extent.StartLineNumber; kind = 'type'
+            written = $typeNode.Extent.Text; name = "[$text]"; why = 'a WMI type'
+            function = $placement.Function; bounded = $placement.Bounded; timeout = ''
         }
     }
 }
@@ -25693,15 +25802,16 @@ ConvertTo-Json -InputObject @($found) -Depth 3 -Compress
 
 
 def wmi_call_sites(paths):
-    """Every WMI-backed command call in ``paths``, read from the syntax tree."""
+    """Every WMI-reaching command or type use in ``paths``, read from the syntax tree."""
     env = dict(os.environ)
     env["LC_WMI_LINT_PATHS"] = json.dumps([str(path) for path in paths])
     env["LC_WMI_LINT_PATTERN"] = WMI_COMMAND.pattern
+    env["LC_WMI_LINT_BACKED"] = json.dumps(list(WMI_BACKED_CMDLETS))
     env["LC_WMI_LINT_WRAPPER"] = SYSTEM_QUERY_WRAPPER
     result = subprocess.run(
         [PWSH, "-NoProfile", "-NonInteractive", "-Command", WMI_CALL_SITES_SCRIPT],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=180, env=env, cwd=str(REPO), stdin=subprocess.DEVNULL)
+        timeout=300, env=env, cwd=str(REPO), stdin=subprocess.DEVNULL)
     if result.returncode != 0:
         raise AssertionError("the syntax-tree scan failed:\n" + (result.stdout or "") +
                              (result.stderr or ""))
@@ -25709,17 +25819,19 @@ def wmi_call_sites(paths):
 
 
 def unbounded_wmi_offenders(sites):
-    """Each call site that breaks the rule, as one line naming it and why."""
+    """Each use that breaks the rule, as one line naming it and why."""
     offenders = []
     for site in sites:
-        where = "{}:{} {} (in {})".format(
-            site["file"], site["line"], site["name"], site["function"] or "the script body")
+        where = "{}:{} {} = {} ({}; in {})".format(
+            site["file"], site["line"], site["written"], site["name"], site["why"],
+            site["function"] or "the script body")
         key = (site["file"], site["function"], site["name"])
         if not site["bounded"]:
-            if key not in SYSTEM_QUERY_UNBOUNDED_ALLOWED:
-                offenders.append(where + " -- not inside " + SYSTEM_QUERY_WRAPPER + " -Query")
+            if site["kind"] == "command" and key in SYSTEM_QUERY_UNBOUNDED_ALLOWED:
+                continue
+            offenders.append(where + " -- not inside " + SYSTEM_QUERY_WRAPPER + " -Query")
             continue
-        if WMI_ITSELF.match(site["name"]) and \
+        if site["kind"] == "command" and WMI_ITSELF.match(site["name"]) and \
                 site["timeout"] != "$" + SYSTEM_QUERY_BOUND_VARIABLE:
             offenders.append(where + " -- carries no -OperationTimeoutSec $" +
                              SYSTEM_QUERY_BOUND_VARIABLE)
@@ -25733,6 +25845,51 @@ def script_sources_for_the_wmi_rule():
             if tests not in path.resolve().parents
             and (SCRIPTS.resolve() in path.resolve().parents
                  or COMFY.resolve() in path.resolve().parents)]
+
+
+# Each way of reaching WMI the rule must catch, as (label, line appended to a
+# copy of stop.ps1, what the offender must say). Scanned only, never run.
+WMI_LINT_EVASIONS = (
+    ("a new cmdlet elsewhere", "$a = @(Get-NetAdapter -ErrorAction Stop)", "not inside"),
+    ("alias gcim", "$p = gcim Win32_OperatingSystem", "Get-CimInstance"),
+    ("alias icim", "icim -ClassName Win32_OperatingSystem -MethodName Reboot", "Invoke-CimMethod"),
+    ("alias ncms", "$s = ncms", "New-CimSession"),
+    ("module-qualified CimCmdlets", "$p = CimCmdlets\\Get-CimInstance Win32_OperatingSystem",
+     "Get-CimInstance"),
+    ("module-qualified NetTCPIP", "$a = NetTCPIP\\Get-NetIPAddress", "Get-NetIPAddress"),
+    ("Storage Get-Volume", "$v = Get-Volume", "cmdletization"),
+    ("Storage Get-Disk", "$d = Get-Disk", "cmdletization"),
+    ("Get-PnpDevice", "$g = Get-PnpDevice -Class Display", "cmdletization"),
+    ("Get-SmbShare", "$s = Get-SmbShare", "cmdletization"),
+    ("Get-Printer", "$p = Get-Printer", "cmdletization"),
+    ("Get-ComputerInfo", "$c = Get-ComputerInfo", "queries WMI itself"),
+    ("Get-HotFix", "$h = Get-HotFix", "queries WMI itself"),
+    ("Get-WmiObject (not in pwsh 7)", "$w = Get-WmiObject Win32_OperatingSystem", "not inside"),
+    ("the invocation operator", "& 'Get-CimInstance' -ClassName Win32_OperatingSystem", "not inside"),
+    ("[wmisearcher]", "$s = [wmisearcher]'SELECT * FROM Win32_OperatingSystem'", "a WMI type"),
+    ("[wmi]", "$o = [wmi]'root/cimv2:Win32_OperatingSystem=@'", "a WMI type"),
+    ("[wmiclass]", "$c = [wmiclass]'Win32_OperatingSystem'", "a WMI type"),
+    ("System.Management type",
+     "$s = [System.Management.ManagementObjectSearcher]::new('SELECT * FROM Win32_OperatingSystem')",
+     "a WMI type"),
+    ("System.Management without the System prefix",
+     "$s = [Management.ManagementObjectSearcher]::new('x')", "a WMI type"),
+    ("CimSession through .NET",
+     "$r = [Microsoft.Management.Infrastructure.CimSession]::Create($null).QueryInstances("
+     "'root/cimv2', 'WQL', 'SELECT * FROM Win32_OperatingSystem')", "a WMI type"),
+    ("a CimInstance parameter type",
+     "function Test-Lc { param([Microsoft.Management.Infrastructure.CimInstance]$Item) }", "a WMI type"),
+    ("New-Object of a WMI type",
+     "$s = New-Object -TypeName System.Management.ManagementObjectSearcher", "New-Object"),
+    ("the WMI scripting COM object", "$l = New-Object -ComObject WbemScripting.SWbemLocator",
+     "New-Object"),
+    ("another wrapper's name",
+     "$r = Invoke-LcSystemQuery -Query { Get-NetRoute -ErrorAction Stop }", "not inside"),
+    ("a block that is not -Query",
+     "$r = Invoke-LcBoundedSystemQuery -What 'x' -Arguments { Get-NetRoute }", "not inside"),
+    ("an exempt cmdlet outside its function",
+     "function Invoke-LcSomethingElse {\n    New-NetFirewallRule -Name 'x'\n}", "not inside"),
+)
 
 
 class SystemQueryBoundLintTests(unittest.TestCase):
@@ -25760,12 +25917,12 @@ class SystemQueryBoundLintTests(unittest.TestCase):
         """The scan proved against the mistakes it exists to catch.
 
         Each case is written into a copy, in a directory of this test's own,
-        and only scanned -- never run.
+        and only scanned -- never run. All cases are scanned in one pass, one
+        file each, so an offender is attributed to its own file.
         """
         workspace = make_temporary_directory(prefix="lc wmi lint ")
         self.addCleanup(shutil.rmtree, workspace, True)
         library = (SCRIPTS / "lib" / "Common.ps1").read_text(encoding="utf-8-sig")
-        strict = (SCRIPTS / "lib" / "StrictLan.ps1").read_text(encoding="utf-8-sig")
         stop = (SCRIPTS / "stop.ps1").read_text(encoding="utf-8-sig")
 
         def replaced_once(text, old, new):
@@ -25774,7 +25931,8 @@ class SystemQueryBoundLintTests(unittest.TestCase):
 
         cases = {
             # The identity read taken back out of the wrapper.
-            "Common.ps1": (
+            "identity unwrapped": (
+                "Common.ps1",
                 replaced_once(
                     library,
                     "$info = @(Invoke-LcBoundedSystemQuery -What 'a process query (WMI)' "
@@ -25782,39 +25940,35 @@ class SystemQueryBoundLintTests(unittest.TestCase):
                     "$info = @(& {"),
                 "not inside"),
             # Inside the wrapper, but WMI itself is no longer asked for the bound.
-            "Common copy.ps1": (
+            "no operation timeout": (
+                "Common.ps1",
                 replaced_once(
                     library,
                     " -OperationTimeoutSec $SystemQueryTimeoutSeconds -ErrorAction Stop |",
                     " -ErrorAction Stop |"),
                 "carries no -OperationTimeoutSec"),
-            # A new call site, somewhere else entirely.
-            "stop.ps1": (stop + "\n$adapters = @(Get-NetAdapter -ErrorAction Stop)\n", "not inside"),
-            # A wrapper by another name is not the wrapper.
-            "stop copy.ps1": (
-                stop + "\n$r = Invoke-LcSystemQuery -Query { Get-NetRoute -ErrorAction Stop }\n",
-                "not inside"),
-            # The script block given, but not as -Query.
-            "stop third.ps1": (
-                stop + "\n$r = Invoke-LcBoundedSystemQuery -What 'x' -Arguments { Get-NetRoute }\n",
-                "not inside"),
-            # An exempt command outside the one function it is exempt in.
-            "StrictLan.ps1": (
-                strict + "\nfunction Invoke-LcSomethingElse {\n    New-NetFirewallRule -Name 'x'\n}\n",
-                "not inside"),
-            # A call through the invocation operator is still a call.
-            "stop fourth.ps1": (stop + "\n& 'Get-CimInstance' -ClassName Win32_OperatingSystem\n",
-                                "not inside"),
         }
-        for name, (text, expected) in cases.items():
-            with self.subTest(case=name):
-                target = workspace / name
-                target.write_text(text, encoding="utf-8")
-                offenders = unbounded_wmi_offenders(wmi_call_sites([target]))
-                self.assertTrue(offenders, "the rule did not fire on " + name)
+        for label, line, expected in WMI_LINT_EVASIONS:
+            file = "StrictLan.ps1" if "exempt" in label else "stop.ps1"
+            cases[label] = (file, stop + "\n" + line + "\n", expected)
+
+        targets = {}
+        for index, (label, (file, text, expected)) in enumerate(sorted(cases.items())):
+            folder = workspace / "case {:02d}".format(index)
+            folder.mkdir()
+            target = folder / file
+            target.write_text(text, encoding="utf-8")
+            targets[str(target)] = (label, expected)
+        sites = wmi_call_sites([Path(path) for path in targets])
+
+        for path, (label, expected) in targets.items():
+            with self.subTest(case=label):
+                mine = wmi_call_sites_for(sites, path)
+                offenders = unbounded_wmi_offenders(mine)
+                self.assertTrue(offenders, "the rule did not fire on " + label)
                 self.assertTrue(any(expected in offender for offender in offenders),
                                 "fired, but not for the right reason: {} -> {}".format(
-                                    name, offenders))
+                                    label, offenders))
 
     def test_the_unmodified_sources_pass_the_same_scan(self):
         """The control for the test above: the copies differ only by the case."""
@@ -25822,6 +25976,23 @@ class SystemQueryBoundLintTests(unittest.TestCase):
                                 SCRIPTS / "stop.ps1"])
         self.assertEqual([], unbounded_wmi_offenders(sites))
         self.assertTrue(sites, "the control found no WMI call at all")
+
+    def test_the_colon_form_of_query_counts_as_bounded(self):
+        """-Query:{ ... } is the same parameter as -Query { ... }: no false alarm."""
+        workspace = make_temporary_directory(prefix="lc wmi lint ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        target = workspace / "colon.ps1"
+        target.write_text(
+            "$r = Invoke-LcBoundedSystemQuery -What 'x' -Query:{ Get-NetRoute -ErrorAction Stop }\n",
+            encoding="utf-8")
+        sites = wmi_call_sites([target])
+        self.assertEqual(1, len(sites), sites)
+        self.assertEqual([], unbounded_wmi_offenders(sites))
+
+
+def wmi_call_sites_for(sites, path):
+    """The sites the scan found in one file, told apart by the folder it is in."""
+    return [site for site in sites if site.get("path", "") == path]
 
 
 # ==========================================================================
@@ -25865,6 +26036,19 @@ CIM_HONOURING_ITS_TIMEOUT = (
     "        throw \"Injected: the WMI operation timed out after $OperationTimeoutSec seconds.\"\n"
     "    }\n"
     "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+FAILING_CIM = (
+    "function Get-CimInstance {\n"
+    "    # Injected by the test suite: the WMI query fails outright.\n"
+    "    throw 'Injected: the WMI provider failed.'\n"
+    "}\n")
+
+# Windows answers, but with nothing that identifies the process.
+CIM_WITHOUT_AN_EXECUTABLE = (
+    "function Get-CimInstance {\n"
+    "    # Injected by the test suite: an answer with no executable in it.\n"
+    "    [pscustomobject]@{ ExecutablePath = ''; CommandLine = ''; CreationDate = [datetime]::UtcNow }\n"
     "}\n")
 
 STALLED_NET_IP_ADDRESS = (
@@ -26142,46 +26326,126 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
 
     # -- start.ps1 ---------------------------------------------------------
 
-    def test_start_finishes_when_windows_never_answers_the_identity_query(self):
-        """The stall this bound exists for, through start.ps1.
+    # The three ways Windows can fail to identify a process start.ps1 has just
+    # launched, and the fix each one is owed. (label, shadow, what the detail
+    # says, what the fix says)
+    UNIDENTIFIED_LAUNCH_CAUSES = (
+        ("stalled", STALLED_CIM,
+         "Windows did not answer a process query (WMI) within {} s".format(SYSTEM_QUERY_BOUND_SECONDS),
+         "its management service (WMI) is stuck"),
+        ("failed", FAILING_CIM,
+         "Windows could not answer a process query (WMI) for PID",
+         "Windows could not answer a process query (WMI)"),
+        ("answered without an executable", CIM_WITHOUT_AN_EXECUTABLE,
+         "Windows did not report the identity of PID",
+         "Windows could not answer a process query (WMI)"),
+    )
 
-        ComfyUI's record is written without the identity it could not read,
-        and start.ps1 says so. The gateway's cannot be written with it either,
-        and that is the save-failure path: the gateway this run launched is
-        stopped by the handle start.ps1 holds, and start.ps1 exits 5 naming
-        WMI and the bound -- instead of never exiting at all.
+    def comfy_launched_pids(self):
+        """PIDs of the ComfyUI stubs start.ps1 launched, from the stub's own tripwire."""
+        if not self.comfy_marker.exists():
+            return []
+        return [int(found) for found in re.findall(
+            r"pid=(\d+)", self.comfy_marker.read_text(encoding="utf-8", errors="replace"))]
+
+    def test_start_undoes_a_comfy_launch_windows_will_not_identify(self):
+        """No LocalCanvas-started ComfyUI is ever left with a record that cannot prove it.
+
+        Before, start.ps1 wrote a record without an executable and said
+        "scripts\\stop.ps1 will stop it" -- which stop.ps1 then could not do,
+        for the whole session. Now the ComfyUI this run launched is stopped by
+        the handle start.ps1 holds, nothing is recorded, no gateway starts, and
+        start.ps1 exits 3 saying which of the three causes it was.
         """
+        for label, shadow, said, fix in self.UNIDENTIFIED_LAUNCH_CAUSES:
+            with self.subTest(cause=label):
+                for stale in (self.comfy_marker, self.gateway_marker):
+                    if stale.exists():
+                        stale.unlink()
+                self.write_config()
+                copied = self.copy_scripts_with(shadow, "comfy {}".format(label))
+
+                began = time.monotonic()
+                result, document = self.run_json("start.ps1", script_dir=copied, timeout=170)
+                took = time.monotonic() - began
+                output = self.output_of(result)
+                self.assertEqual(3, result.returncode, output)
+                self.assert_no_stack_trace(output)
+
+                error = document["error"]
+                self.assertEqual("ComfyUI's ownership record could not be written", error["what"], output)
+                self.assertIn(said, error["detail"])
+                self.assertIn("was stopped", error["detail"])
+                self.assertIn("No gateway was started.", error["detail"])
+                self.assertIn(fix, error["fix"])
+                self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
+                self.assertNotIn("will stop it", output)
+                self.assertEqual("failed", document["comfy"]["status"], output)
+
+                # Nothing recorded, the child gone, and no gateway launched.
+                self.assertIsNone(self.read_pid_file("comfy"), output)
+                self.assertIsNone(self.read_pid_file("gateway"), output)
+                launched = self.comfy_launched_pids()
+                self.assertEqual(1, len(launched), output)
+                self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                                "the ComfyUI this run launched is still running with no record")
+                self.assertEqual([], self.launched_gateway_pids(), output)
+                self.assertLess(took, SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS + 60,
+                                output)
+
+    def test_a_record_already_there_is_kept_when_start_refuses_to_record(self):
+        """The refusal removes nothing it has not proved.
+
+        A record for a live process LocalCanvas could not prove, and a launch
+        whose identity Windows does not answer: the launch is undone, and the
+        record naming the other process -- evidence, not this run's -- stays.
+        """
+        idle = self.start_idle_process()
         self.write_config()
+        record = self.unprovable_record(idle.pid)
+        self.write_pid_file("comfy", record)
         stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
 
-        began = time.monotonic()
-        result, document = self.run_json("start.ps1", script_dir=stalled, timeout=170)
-        took = time.monotonic() - began
+        result = self.run_script("start.ps1", script_dir=stalled, timeout=170)
         output = self.output_of(result)
-        self.assertEqual(5, result.returncode, output)
-        self.assert_no_stack_trace(output)
-
-        comfy = self.read_pid_file("comfy")
-        self.assertIsNotNone(comfy, output)
-        self.assertEqual("", comfy["image_path"], output)
-        self.assertIn("The identity of PID {} could not be read".format(comfy["pid"]), output)
-
-        error = document["error"]
-        self.assertEqual("The gateway's ownership record could not be written", error["what"], output)
-        self.assertIn("Windows did not answer a process query (WMI) within {} s".format(
-            SYSTEM_QUERY_BOUND_SECONDS), error["detail"])
-        self.assertIn("was stopped", error["detail"])
-        self.assertIn("WMI", error["fix"])
-        self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
-        self.assertEqual("failed", document["gateway"]["status"])
-        self.assertIsNone(self.read_pid_file("gateway"))
-        launched = self.launched_gateway_pids()
+        self.assertEqual(3, result.returncode, output)
+        self.assertEqual(record, self.read_pid_file("comfy"), output)
+        self.assertIsNone(idle.poll(), "start.ps1 stopped a process it could not prove")
+        launched = [pid for pid in self.comfy_launched_pids() if pid != idle.pid]
         self.assertEqual(1, len(launched), output)
-        self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
-                        "the gateway this run launched is still running with no record")
-        # ComfyUI's read and the gateway's, each bounded, and the rest of start.
-        self.assertLess(took, 2 * (SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS) + 60,
-                        output)
+        self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20), output)
+
+    def test_start_undoes_a_gateway_launch_windows_will_not_identify(self):
+        """The same rule on the gateway half: exit 5, and a fix that fits the cause.
+
+        Before, a query that FAILED (rather than timed out) was told to "make
+        sure LocalCanvas can write to" the runtime directory, which is advice
+        for a different failure.
+        """
+        for label, shadow, said, fix in self.UNIDENTIFIED_LAUNCH_CAUSES:
+            with self.subTest(cause=label):
+                if self.gateway_marker.exists():
+                    self.gateway_marker.unlink()
+                self.write_config()
+                copied = self.copy_scripts_with(shadow, "gateway {}".format(label))
+
+                result, document = self.run_json(
+                    "start.ps1", "-Component", "Gateway", script_dir=copied, timeout=170)
+                output = self.output_of(result)
+                self.assertEqual(5, result.returncode, output)
+                self.assert_no_stack_trace(output)
+                error = document["error"]
+                self.assertEqual("The gateway's ownership record could not be written", error["what"], output)
+                self.assertIn(said, error["detail"])
+                self.assertIn("was stopped", error["detail"])
+                self.assertIn(fix, error["fix"])
+                self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
+                self.assertEqual("failed", document["gateway"]["status"])
+                self.assertIsNone(self.read_pid_file("gateway"))
+                launched = self.launched_gateway_pids()
+                self.assertEqual(1, len(launched), output)
+                self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                                "the gateway this run launched is still running with no record")
 
     def test_start_finishes_when_windows_never_answers_the_lan_address_query(self):
         """The wildcard-bind path a user runs daily, with the adapter query stalled."""

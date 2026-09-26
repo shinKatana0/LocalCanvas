@@ -226,17 +226,17 @@ function Complete-Run {
     exit $Code
 }
 
-function Stop-LcLaunchedGateway {
+function Stop-LcLaunchedChild {
     <#
-        Stop the gateway THIS run launched, through the process object this
-        run holds -- so by its exact PID, never by name or port -- and say
-        whether it is proven gone.
+        Stop the gateway or ComfyUI THIS run launched, through the process
+        object this run holds -- so by its exact PID, never by name or port --
+        and say whether it is proven gone.
 
         Gone means Stop-LcOwnedProcess reported 'exited' or 'terminated' AND
         the process object agrees. Anything else -- 'still-running', or a stop
         that threw -- is not proof, and a caller must not act as if it were:
         the ownership record is the only thing that lets stop.ps1 stop a
-        gateway later, so it is removed only for a gateway that is gone.
+        process later, so it is removed only for a process that is gone.
     #>
     param([Parameter(Mandatory)][System.Diagnostics.Process]$Process)
     $outcome = 'not-attempted'
@@ -255,6 +255,37 @@ function Stop-LcLaunchedGateway {
         }
     }
     return [pscustomobject]@{ Outcome = $outcome; Gone = $gone }
+}
+
+function Get-LcRecordFailure {
+    <#
+        What went wrong when Save-LcOwnedProcess threw for a process this run
+        just launched, as the things a failure message needs: whether the
+        cause was the identity read (then no record was written, and a record
+        already there is not this run's to remove), whether it was the bound,
+        and the one fix that fits the cause.
+    #>
+    param(
+        [Parameter(Mandatory)][System.Exception]$Exception,
+        [Parameter(Mandatory)][string]$RecordPath
+    )
+    $identityUnreadable = [bool]($Exception.Data -and $Exception.Data.Contains('LcIdentityUnreadable'))
+    $timedOut = ($Exception -is [System.TimeoutException])
+    if ($identityUnreadable -and $timedOut) {
+        $fix = ('Start again. If Windows keeps not answering process queries, its management ' +
+            'service (WMI) is stuck; restarting Windows usually clears it.')
+    } elseif ($identityUnreadable) {
+        $fix = ('Start again. If it keeps failing, Windows could not answer a process query (WMI): ' +
+            'that service is not working, and restarting Windows usually clears it.')
+    } else {
+        $fix = "Make sure LocalCanvas can write to $(Split-Path -Parent $RecordPath), then start again."
+    }
+    return [pscustomobject]@{
+        Message            = "$($Exception.Message)".Trim()
+        IdentityUnreadable = $identityUnreadable
+        TimedOut           = $timedOut
+        Fix                = $fix
+    }
 }
 
 function Get-LogText {
@@ -488,11 +519,52 @@ try {
 
                 # Ownership is recorded ONLY because LocalCanvas started it, and
                 # with enough evidence beside the PID to prove identity later.
+                #
+                # A record that cannot prove anything is not written at all: a
+                # ComfyUI whose identity Windows would not report right after
+                # the launch would be one stop.ps1 can never stop. So that --
+                # and a record that cannot be written -- undoes the launch, by
+                # the handle this run holds, exactly as for the gateway below.
+                $comfyRecordPath = Get-LcPidFilePath -Role 'comfy'
+                $comfySaveFailure = $null
+                try {
+                    [void](Save-LcOwnedProcess -Role 'comfy' -Process $comfyProcess -Endpoint $comfyUrl `
+                            -CommandLine "$exe $commandLine" -FailWhenUnprovable)
+                } catch {
+                    $comfySaveFailure = Get-LcRecordFailure -Exception $_.Exception -RecordPath $comfyRecordPath
+                }
+                if ($null -ne $comfySaveFailure) {
+                    $launchedPid = $comfyProcess.Id
+                    $stopped = Stop-LcLaunchedChild -Process $comfyProcess
+                    $comfyResult.status = 'failed'
+                    $detail = @("Record: $comfyRecordPath", $comfySaveFailure.Message)
+                    if ($stopped.Gone) {
+                        # A failed write may have left a partial file of this
+                        # run's own. An unread identity wrote nothing, and a
+                        # record already there describes some other process:
+                        # that one is kept.
+                        if (-not $comfySaveFailure.IdentityUnreadable) {
+                            try { Remove-LcOwnedProcessRecord -Role 'comfy' } catch { }
+                        }
+                        $detail += "The ComfyUI this run started (PID $launchedPid) was stopped ($($stopped.Outcome)): without a record that proves it is LocalCanvas's, nothing could have stopped it later."
+                        $detail += 'No gateway was started.'
+                        Write-LcFailure -What "ComfyUI's ownership record could not be written" -Detail $detail `
+                            -Fix $comfySaveFailure.Fix
+                    } else {
+                        $comfyResult.pid = $launchedPid
+                        $detail += "PID $launchedPid is STILL RUNNING and LocalCanvas has no record that proves it is LocalCanvas's: scripts\stop.ps1 cannot stop it."
+                        $detail += "Stopping it was attempted: $($stopped.Outcome)."
+                        $detail += 'No gateway was started.'
+                        Write-LcFailure -What "ComfyUI's ownership record could not be written, and ComfyUI (PID $launchedPid) could not be stopped" `
+                            -Detail $detail `
+                            -Fix ("End PID $launchedPid yourself -- Task Manager, Details tab, by that PID and no other -- " +
+                                "then start again. $($comfySaveFailure.Fix)")
+                    }
+                    Complete-Run $EXIT_COMFY
+                }
                 $comfyOwned = $true
                 $comfyPid = $comfyProcess.Id
-                [void](Save-LcOwnedProcess -Role 'comfy' -Process $comfyProcess -Endpoint $comfyUrl `
-                        -CommandLine "$exe $commandLine")
-                Write-LcDetail "PID $comfyPid recorded in $(Get-LcPidFilePath -Role 'comfy')"
+                Write-LcDetail "PID $comfyPid recorded in $comfyRecordPath"
             }
             $comfyResult.ownership = 'owned'
             $comfyResult.pid = $comfyPid
@@ -892,16 +964,16 @@ try {
         # gateway nothing can stop, and the next start then fails the port
         # check for ever. So a record that cannot be written undoes the launch.
         # So does one that could be written but could never prove anything:
-        # when Windows does not answer the identity query in time, the record
-        # would name a PID with no executable and no start time to check it
-        # by, and a later stop would have to leave that gateway alone.
+        # when Windows does not report the identity of the gateway it just
+        # launched (in time, or at all), the record would name a PID with no
+        # executable and no start time to check it by, and a later stop would
+        # have to leave that gateway alone.
         $gatewayRecordPath = Get-LcPidFilePath -Role 'gateway'
-        $recordSaveError = $null
-        $recordSaveTimedOut = $false
+        $recordSaveFailure = $null
         try {
             $gatewayRecordPath = Save-LcOwnedProcess -Role 'gateway' -Process $gatewayProcess `
                 -Endpoint $endpoints.GatewayBaseUrl -CommandLine "$python $gatewayCommandLine" `
-                -FailWhenUnanswered `
+                -FailWhenUnprovable `
                 -Extra ([ordered]@{
                     instance_id        = $instanceId
                     published_endpoint = $endpoint.Url
@@ -912,29 +984,27 @@ try {
                 throw "no record is at $gatewayRecordPath after it was written"
             }
         } catch {
-            $recordSaveError = "$($_.Exception.Message)".Trim()
-            $recordSaveTimedOut = ($_.Exception -is [System.TimeoutException])
+            $recordSaveFailure = Get-LcRecordFailure -Exception $_.Exception -RecordPath $gatewayRecordPath
         }
-        if ($null -ne $recordSaveError) {
+        if ($null -ne $recordSaveFailure) {
             $launchedPid = $gatewayProcess.Id
-            $stopped = Stop-LcLaunchedGateway -Process $gatewayProcess
+            $stopped = Stop-LcLaunchedChild -Process $gatewayProcess
             $gatewayResult.status = 'failed'
-            $detail = @("Record: $gatewayRecordPath", $recordSaveError)
+            $detail = @("Record: $gatewayRecordPath", $recordSaveFailure.Message)
             if ($stopped.Gone) {
                 # Nothing this run wrote may outlive the process it describes:
                 # a partial file left by the failed write goes too, if it can.
-                try { Remove-LcOwnedProcessRecord -Role 'gateway' } catch { }
+                # An unread identity wrote nothing, and a record already there
+                # describes some other process: that one is kept.
+                if (-not $recordSaveFailure.IdentityUnreadable) {
+                    try { Remove-LcOwnedProcessRecord -Role 'gateway' } catch { }
+                }
                 $detail += "The gateway this run started (PID $launchedPid) was stopped ($($stopped.Outcome)): without its record nothing could have stopped it later."
                 if ($comfyOwned) {
                     $detail += "ComfyUI (PID $comfyPid) was left running; scripts\stop.ps1 will stop it."
                 }
-                $fix = "Make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath), then start again."
-                if ($recordSaveTimedOut) {
-                    $fix = ('Start again. If Windows keeps not answering process queries, its management ' +
-                        'service (WMI) is stuck; restarting Windows usually clears it.')
-                }
                 Write-LcFailure -What "The gateway's ownership record could not be written" -Detail $detail `
-                    -Fix $fix
+                    -Fix $recordSaveFailure.Fix
             } else {
                 # The one outcome with no safe cleanup left: a live gateway
                 # that no record describes. Said as loudly as this can say
@@ -948,7 +1018,7 @@ try {
                 Write-LcFailure -What "The gateway's ownership record could not be written, and the gateway (PID $launchedPid) could not be stopped" `
                     -Detail $detail `
                     -Fix ("End PID $launchedPid yourself -- Task Manager, Details tab, by that PID and no other -- " +
-                        "then make sure LocalCanvas can write to $(Split-Path -Parent $gatewayRecordPath) and start again.")
+                        "then start again. $($recordSaveFailure.Fix)")
             }
             Complete-Run $EXIT_GATEWAY
         }
@@ -971,7 +1041,7 @@ try {
             # or when the record now names no live process at all. A gateway
             # that did not exit keeps its record, because that record is the
             # only thing that lets stop.ps1 stop it.
-            $stopped = Stop-LcLaunchedGateway -Process $gatewayProcess
+            $stopped = Stop-LcLaunchedChild -Process $gatewayProcess
             $recordKept = $false
             if ($stopped.Gone) {
                 Remove-LcOwnedProcessRecord -Role 'gateway'

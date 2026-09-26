@@ -2188,22 +2188,41 @@ function Save-LcOwnedProcess {
         # without them -- one written before they existed -- still loads,
         # because nothing in the ownership decision reads them.
         [System.Collections.IDictionary]$Extra = $null,
-        # Throw instead of writing a record that can never prove anything,
-        # when the identity query itself gave no answer (Windows did not
-        # answer in time, or the query failed). For a caller that can still
-        # undo its launch by the handle it holds, which is better than a live
-        # process nothing will ever be able to stop.
-        [switch]$FailWhenUnanswered
+        # Throw instead of writing a record that can never prove anything:
+        # when the identity of a process that is still running could not be
+        # read -- Windows did not answer in time, the query failed, or it
+        # answered without an executable or a start time. For a caller that
+        # launched that process and can still undo the launch by the handle it
+        # holds, which is better than a live process nothing will ever be
+        # able to stop. The exception carries Data['LcIdentityUnreadable'],
+        # and is a System.TimeoutException when the cause was the bound.
+        # Nothing is written, and no existing record is touched, when it throws.
+        [switch]$FailWhenUnprovable
     )
     # Recorded from the SAME source the verification reads. An asymmetry here
     # is what turned a healthy process into an unrecognised one: the launch
     # side read the right value and the verification side read a module path,
     # so the two could never agree (T-0088).
     $identity = Get-LcProcessIdentity -ProcessId $Process.Id
-    if ($FailWhenUnanswered -and $identity.QueryFailed) {
-        $message = "$($identity.QueryError), so the identity of PID $($Process.Id) could not be recorded."
-        if ($identity.TimedOut) { throw [System.TimeoutException]::new($message) }
-        throw [System.InvalidOperationException]::new($message)
+    if ($FailWhenUnprovable -and -not $identity.Readable) {
+        $running = $true
+        try { $Process.Refresh(); $running = -not $Process.HasExited } catch { $running = $true }
+        # A process that has already exited is not unprovable, it is gone:
+        # the caller's own readiness check reports that, with its log.
+        if ($running) {
+            if ($identity.TimedOut) {
+                $failure = [System.TimeoutException]::new(
+                    "$($identity.QueryError), so the identity of PID $($Process.Id) could not be recorded.")
+            } elseif ($identity.QueryFailed) {
+                $failure = [System.InvalidOperationException]::new(
+                    "Windows could not answer a process query (WMI) for PID $($Process.Id): $($identity.QueryError) -- so its identity could not be recorded.")
+            } else {
+                $failure = [System.InvalidOperationException]::new(
+                    "Windows did not report the identity of PID $($Process.Id) ($($identity.Reason)), so it could not be recorded.")
+            }
+            $failure.Data['LcIdentityUnreadable'] = $true
+            throw $failure
+        }
     }
     $imagePath = ''
     $startUtc = $null
