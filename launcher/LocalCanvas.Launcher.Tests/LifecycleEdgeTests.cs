@@ -314,3 +314,73 @@ public sealed class SessionBudgetTests
         Assert.Equal(TimeSpan.FromSeconds(30), controller.StopAndConfirmReserve());
     }
 }
+
+public sealed class SessionEndStopShareTests
+{
+    [Fact]
+    public async Task The_reserve_is_split_between_the_stop_and_the_confirmation()
+    {
+        await using var harness = new ControllerHarness();
+        harness.Runtime.DurationOf = call => call.Script == "status.ps1" ? TimeSpan.FromSeconds(11) : TimeSpan.FromMilliseconds(5);
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+        // The measured failure: stop.ps1 not yet measured (8 s assumed), status.ps1 11 s under load.
+        Assert.Equal((TimeSpan.FromSeconds(12), TimeSpan.FromSeconds(16.5)), controller.ReserveParts());
+
+        harness.Runtime.DurationOf = call => TimeSpan.FromMilliseconds(5);
+        Assert.True(await controller.RequestRestartGatewayAsync());
+        // A restart measures stop.ps1 (5 ms) and leaves status.ps1 as measured.
+        Assert.Equal((TimeSpan.FromMilliseconds(7.5), TimeSpan.FromSeconds(16.5)), controller.ReserveParts());
+    }
+
+    [Fact]
+    public async Task Tiny_measurements_keep_the_floor_and_at_least_five_seconds_for_the_confirmation()
+    {
+        await using var harness = new ControllerHarness();
+        harness.Runtime.DurationOf = call => TimeSpan.FromMilliseconds(5);
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+        Assert.True(await controller.RequestRestartGatewayAsync());
+        Assert.Equal((TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5)), controller.ReserveParts());
+    }
+
+    [Fact]
+    public async Task A_start_that_outlasts_the_first_wait_is_given_the_stop_share_and_is_then_stopped_and_confirmed()
+    {
+        await using var harness = new ControllerHarness();
+        harness.Runtime.DurationOf = call => call.Script is "status.ps1" or "stop.ps1" ? TimeSpan.FromSeconds(1) : TimeSpan.FromMilliseconds(5);
+        var controller = await harness.StartAndWaitAsync(LauncherState.Ready);
+        Assert.True(await controller.RequestRestartGatewayAsync());
+
+        // A restart whose Gateway start is still in flight when the session ends.
+        var inFlight = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        harness.Runtime.BeforeAnswer = async (call, token) =>
+        {
+            if (call.Names("start.ps1", "-Component", "Gateway"))
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            }
+        };
+        harness.Runtime.StillRunningAfterCancel = call => call.Names("start.ps1", "-Component", "Gateway") ? inFlight.Task : null;
+        var starts = harness.Runtime.Calls.Count(call => call.Names("start.ps1", "-Component", "Gateway"));
+        _ = controller.RequestRestartGatewayAsync();
+        await harness.WaitForAsync(_ => harness.Runtime.Calls.Count(call => call.Names("start.ps1", "-Component", "Gateway")) > starts, "the second restart's start");
+
+        // Budget 12 s: reserve 8 s (the cap), of which 5 s is the confirmation's.
+        // First wait ends at 4 s, the second at 7 s; the start ends at 5.5 s.
+        var began = DateTime.UtcNow;
+        var ending = Task.Run(() => controller.EndSession(TimeSpan.FromSeconds(12)));
+        await Task.Delay(TimeSpan.FromSeconds(5.5) - (DateTime.UtcNow - began));
+        Assert.DoesNotContain(harness.Runtime.Calls, call => call.Names("stop.ps1"));
+        Assert.False(ending.IsCompleted);
+        harness.Runtime.LiveInstance = FakeRuntime.InstanceId(66);
+        inFlight.SetResult();
+
+        Assert.True(await ending);
+        var ended = harness.Runtime.Timeline.Single(entry => entry.Call == "ended start.ps1 -Component Gateway -Json").At;
+        var stopped = harness.Runtime.Timeline.Single(entry => entry.Call == "start stop.ps1 -Json").At;
+        Assert.True(stopped >= ended, "stop.ps1 ran while the start was still running");
+        Assert.Equal(["stop.ps1 -Json", "status.ps1 -Json"], harness.Runtime.CallNames.TakeLast(2));
+        Assert.Null(harness.Runtime.LiveInstance);
+        Assert.Contains(harness.Log.Lines, line => line.Contains("with the time kept for stop.ps1", StringComparison.Ordinal));
+        Assert.Contains(harness.Log.Lines, line => line == "exit: everything LocalCanvas started has stopped (confirmed by status.ps1)");
+    }
+}

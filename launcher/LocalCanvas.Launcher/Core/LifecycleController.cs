@@ -1141,25 +1141,33 @@ public sealed class LifecycleController : IAsyncDisposable
     private static string Pid(int? pid) => pid is int found ? $" (PID {found.ToString(CultureInfo.InvariantCulture)})" : string.Empty;
 
     /// <summary>
-    /// Whether stop.ps1 may run: never while a script call this run stopped
-    /// waiting for is still running, because a start still in progress would
-    /// start what the stop had just found absent. At a session end the wait is
-    /// bounded by the session budget, keeping time for the stop and its
-    /// confirmation; otherwise the call's own grace has already been waited.
+    /// What the stop and its confirmation are expected to need, in two parts:
+    /// 1.5 times what each took when last run in this session (an assumption
+    /// before that). The total is at least 10 s and never more than two thirds
+    /// of the budget, so that a call in flight always has some of it. The
+    /// confirmation's part is at least 5 s (or the whole total, if smaller).
     /// </summary>
-    /// <summary>
-    /// What the stop and its confirmation are expected to need: 1.5 times what
-    /// they took when last run in this session (an assumption before that), at
-    /// least 10 s, and never more than two thirds of the budget, so that a call
-    /// in flight always has some of it.
-    /// </summary>
-    internal TimeSpan StopAndConfirmReserve()
+    internal (TimeSpan Stop, TimeSpan Status) ReserveParts()
     {
-        var expected = 1.5 * (_lastStopDuration ?? AssumedStopDuration) + 1.5 * (_lastStatusDuration ?? AssumedStatusDuration);
+        var stop = 1.5 * (_lastStopDuration ?? AssumedStopDuration);
+        var status = 1.5 * (_lastStatusDuration ?? AssumedStatusDuration);
         var floor = TimeSpan.FromSeconds(10);
         var cap = _sessionBound * 2 / 3;
-        var reserve = expected < floor ? floor : expected;
-        return reserve > cap ? cap : reserve;
+        var total = stop + status;
+        total = total < floor ? floor : total;
+        total = total > cap ? cap : total;
+        var statusPart = status < MinimumStatusReserve ? MinimumStatusReserve : status;
+        statusPart = statusPart > total ? total : statusPart;
+        return (total - statusPart, statusPart);
+    }
+
+    /// <summary>The time kept for status.ps1's confirmation is never less than this (unless the whole reserve is).</summary>
+    public static readonly TimeSpan MinimumStatusReserve = TimeSpan.FromSeconds(5);
+
+    internal TimeSpan StopAndConfirmReserve()
+    {
+        var (stop, status) = ReserveParts();
+        return stop + status;
     }
 
     private static string Seconds(TimeSpan? span) => span is { } found ? $"{found.TotalSeconds:0.0} s" : "nothing";
@@ -1181,29 +1189,37 @@ public sealed class LifecycleController : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Whether stop.ps1 may run: never while a script call this run stopped
+    /// waiting for is still running, because a start still in progress would
+    /// start what the stop had just found absent. At a session end the wait is
+    /// bounded by the session budget, in two steps: first until the reserve for
+    /// the stop and its confirmation is all that is left; then, if the call is
+    /// still running -- so the stop cannot run anyway and its part of the
+    /// reserve would go unused -- until only the confirmation's part is left.
+    /// A call that ends in that second step is still stopped, with the time the
+    /// budget has left, and the confirmation then gets what remains (or is
+    /// reported as not made). Outside a session end the call's own grace has
+    /// already been waited.
+    /// </summary>
     private async Task<bool> WaitForAbandonedAsync(ExitMode mode)
     {
         if (_abandoned is not { } still || !still.IsStillRunning)
         {
             return true;
         }
-        var wait = TimeSpan.Zero;
         if (mode == ExitMode.SessionEnd)
         {
-            var reserve = StopAndConfirmReserve();
-            _log.Write($"exit: keeping {reserve.TotalSeconds:0.#} s of the session budget for stop.ps1 and status.ps1 " +
-                       $"(last measured {Seconds(_lastStopDuration)} and {Seconds(_lastStatusDuration)})");
-            wait = SessionRemaining - reserve;
-        }
-        if (wait > TimeSpan.Zero)
-        {
-            _log.Write($"exit: waiting up to {wait.TotalSeconds:0.#} s for {still.Call.Script}{Pid(still.ProcessId)} to finish before anything is stopped");
-            try
+            var (stopPart, statusPart) = ReserveParts();
+            _log.Write($"exit: keeping {(stopPart + statusPart).TotalSeconds:0.#} s of the session budget for stop.ps1 ({stopPart.TotalSeconds:0.#} s) " +
+                       $"and status.ps1 ({statusPart.TotalSeconds:0.#} s); last measured {Seconds(_lastStopDuration)} and {Seconds(_lastStatusDuration)}");
+            await WaitForAsync(still, SessionRemaining - (stopPart + statusPart), "to finish before anything is stopped").ConfigureAwait(false);
+            if (still.IsStillRunning)
             {
-                await still.StillRunning!.WaitAsync(wait).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
+                // Nothing can be stopped beside it, so the time kept for the stop
+                // is the call's, not idle: only the confirmation's part is kept.
+                await WaitForAsync(still, SessionRemaining - statusPart,
+                    "more, with the time kept for stop.ps1, since nothing may be stopped beside it").ConfigureAwait(false);
             }
         }
         if (still.IsStillRunning)
@@ -1213,6 +1229,22 @@ public sealed class LifecycleController : IAsyncDisposable
         }
         _log.Write($"exit: {still.Call.Script}{Pid(still.ProcessId)} has finished");
         return true;
+    }
+
+    private async Task WaitForAsync(ScriptOutcome still, TimeSpan wait, string why)
+    {
+        if (wait <= TimeSpan.Zero || !still.IsStillRunning)
+        {
+            return;
+        }
+        _log.Write($"exit: waiting up to {wait.TotalSeconds:0.#} s for {still.Call.Script}{Pid(still.ProcessId)} {why}");
+        try
+        {
+            await still.StillRunning!.WaitAsync(wait).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+        }
     }
 
     /// <summary>status.ps1 after a stop: what is still running, from the scripts' own records and probes.</summary>
