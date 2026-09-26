@@ -1244,6 +1244,28 @@ def tearDownModule():
         )
 
 
+class ScriptTimedOut(subprocess.TimeoutExpired):
+    """A script run that passed its bound, with what it printed before it was stopped.
+
+    subprocess.TimeoutExpired carries the partial output and prints none of it,
+    so a script that stalls reports only "timed out after 180 seconds" -- and
+    not which step it had reached. The output is where the step is named.
+    """
+
+    @staticmethod
+    def _text(value):
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    def __str__(self):
+        return ("{}\n--- standard output before it was stopped ---\n{}\n"
+                "--- standard error before it was stopped ---\n{}").format(
+                    super().__str__(), self._text(self.stdout), self._text(self.stderr))
+
+
 class ScriptTestCase(unittest.TestCase):
     """Shared machinery: a workspace whose every path contains a space."""
 
@@ -1616,22 +1638,28 @@ class ScriptTestCase(unittest.TestCase):
             # the machine running the suite happens to be set up.
             command.extend([
                 "-WorkflowSources", str(self.workspace / "no workflow sources.yaml")])
-        return subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            # PowerShell writes UTF-8. text=True alone decodes with the
-            # machine's locale codepage, which on a non-English Windows
-            # makes the suite fail with a UnicodeDecodeError -- and pass
-            # again in a terminal that happens to be set to UTF-8. A test
-            # result that depends on which shell started it is not a result.
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=env if env is not None else self.script_env(),
-            cwd=str(REPO),
-        )
+        try:
+            return subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                # PowerShell writes UTF-8. text=True alone decodes with the
+                # machine's locale codepage, which on a non-English Windows
+                # makes the suite fail with a UnicodeDecodeError -- and pass
+                # again in a terminal that happens to be set to UTF-8. A test
+                # result that depends on which shell started it is not a result.
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                env=env if env is not None else self.script_env(),
+                cwd=str(REPO),
+            )
+        except subprocess.TimeoutExpired as expired:
+            # The same exception, now saying what the script had printed --
+            # so a stall names its own step instead of only its duration.
+            raise ScriptTimedOut(expired.cmd, expired.timeout,
+                                 output=expired.output, stderr=expired.stderr) from expired
 
     def run_strict_lan(self, *extra_args, refusal_path=False, **kwargs):
         """The ONE way this suite runs the strict LAN script.
@@ -25560,6 +25588,638 @@ def current_user_sid():
     return found.group(1) if found else None
 
 
+# ==========================================================================
+# Every WMI/CIM call in the scripts carries the bound
+# ==========================================================================
+#
+# The rule SystemQueryBoundTests exercises, held in the source: a
+# Get-CimInstance, Get-Net* or Get-DnsClient* call -- any command that waits on
+# WMI -- appears only inside the -Query script block of
+# Invoke-LcBoundedSystemQuery, and a *-Cim* call there also asks WMI itself
+# for the same bound with -OperationTimeoutSec $SystemQueryTimeoutSeconds.
+#
+# Read from the PowerShell syntax tree, not by pattern: a call site renamed,
+# moved or newly added is found wherever it is, and prose about a cmdlet in a
+# comment or a message is not a call.
+
+# The command names that wait on WMI. The Net* modules (NetTCPIP, NetSecurity,
+# NetAdapter, NetConnection ...), DnsClient and ScheduledTasks are CIM
+# underneath; *-Cim* and *-Wmi* are WMI itself.
+WMI_COMMAND = re.compile(
+    r"^(?:[A-Za-z]+)-(?:Cim|Wmi|Net[A-Z]|DnsClient|ScheduledTask)", re.IGNORECASE)
+WMI_ITSELF = re.compile(r"^(?:[A-Za-z]+)-(?:Cim|Wmi)", re.IGNORECASE)
+SYSTEM_QUERY_WRAPPER = "Invoke-LcBoundedSystemQuery"
+SYSTEM_QUERY_BOUND_VARIABLE = "SystemQueryTimeoutSeconds"
+
+# The two WMI calls that are deliberately NOT bounded, by file, function and
+# command. Both CHANGE the firewall, and a change abandoned at a deadline may
+# still land after the script has reported it as not made -- which would break
+# the one promise strict-lan.ps1 makes, that it never changes anything without
+# saying what it changed. Neither is reached on a machine whose WMI is not
+# answering: each runs only after Get-LcStrictLanRules, which is bounded, has
+# read the firewall.
+SYSTEM_QUERY_UNBOUNDED_ALLOWED = {
+    ("StrictLan.ps1", "Invoke-LcStrictLanApply", "New-NetFirewallRule"),
+    ("StrictLan.ps1", "Invoke-LcStrictLanRemove", "Remove-NetFirewallRule"),
+}
+
+# The census: call sites that must be FOUND, bounded, for the scan to count.
+# A scan that finds nothing passes for the wrong reason.
+SYSTEM_QUERY_REQUIRED_SITES = (
+    ("Common.ps1", "Get-LcProcessIdentity", "Get-CimInstance"),
+    ("Common.ps1", "Get-LcLanAddress", "Get-NetIPAddress"),
+)
+
+WMI_CALL_SITES_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$paths = @(ConvertFrom-Json -InputObject $env:LC_WMI_LINT_PATHS)
+$pattern = $env:LC_WMI_LINT_PATTERN
+$found = @()
+foreach ($path in $paths) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    $commands = $ast.FindAll({
+            param($node)
+            $node -is [System.Management.Automation.Language.CommandAst]
+        }, $true)
+    foreach ($command in $commands) {
+        $name = $command.GetCommandName()
+        if (-not $name -or $name -notmatch $pattern) { continue }
+        $function = ''
+        $bounded = $false
+        $node = $command.Parent
+        while ($null -ne $node) {
+            if (-not $function -and $node -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+                $function = $node.Name
+            }
+            if (-not $bounded -and
+                $node -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
+                $node.Parent -is [System.Management.Automation.Language.CommandAst] -and
+                $node.Parent.GetCommandName() -eq $env:LC_WMI_LINT_WRAPPER) {
+                $elements = $node.Parent.CommandElements
+                $index = $elements.IndexOf($node)
+                if ($index -gt 0 -and
+                    $elements[$index - 1] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $elements[$index - 1].ParameterName -eq 'Query') {
+                    $bounded = $true
+                }
+            }
+            $node = $node.Parent
+        }
+        $timeout = ''
+        $elements = $command.CommandElements
+        for ($i = 0; $i -lt $elements.Count; $i++) {
+            $element = $elements[$i]
+            if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $element.ParameterName -eq 'OperationTimeoutSec') {
+                if ($element.Argument) { $timeout = $element.Argument.Extent.Text }
+                elseif ($i + 1 -lt $elements.Count) { $timeout = $elements[$i + 1].Extent.Text }
+            }
+        }
+        $found += [pscustomobject]@{
+            file = [System.IO.Path]::GetFileName($path)
+            path = $path
+            line = $command.Extent.StartLineNumber
+            name = $name
+            function = $function
+            bounded = $bounded
+            timeout = $timeout
+        }
+    }
+}
+ConvertTo-Json -InputObject @($found) -Depth 3 -Compress
+"""
+
+
+def wmi_call_sites(paths):
+    """Every WMI-backed command call in ``paths``, read from the syntax tree."""
+    env = dict(os.environ)
+    env["LC_WMI_LINT_PATHS"] = json.dumps([str(path) for path in paths])
+    env["LC_WMI_LINT_PATTERN"] = WMI_COMMAND.pattern
+    env["LC_WMI_LINT_WRAPPER"] = SYSTEM_QUERY_WRAPPER
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-Command", WMI_CALL_SITES_SCRIPT],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=180, env=env, cwd=str(REPO), stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise AssertionError("the syntax-tree scan failed:\n" + (result.stdout or "") +
+                             (result.stderr or ""))
+    return as_list(json.loads(result.stdout))
+
+
+def unbounded_wmi_offenders(sites):
+    """Each call site that breaks the rule, as one line naming it and why."""
+    offenders = []
+    for site in sites:
+        where = "{}:{} {} (in {})".format(
+            site["file"], site["line"], site["name"], site["function"] or "the script body")
+        key = (site["file"], site["function"], site["name"])
+        if not site["bounded"]:
+            if key not in SYSTEM_QUERY_UNBOUNDED_ALLOWED:
+                offenders.append(where + " -- not inside " + SYSTEM_QUERY_WRAPPER + " -Query")
+            continue
+        if WMI_ITSELF.match(site["name"]) and \
+                site["timeout"] != "$" + SYSTEM_QUERY_BOUND_VARIABLE:
+            offenders.append(where + " -- carries no -OperationTimeoutSec $" +
+                             SYSTEM_QUERY_BOUND_VARIABLE)
+    return offenders
+
+
+def script_sources_for_the_wmi_rule():
+    """Every shipped PowerShell source the rule binds: scripts/ and comfy/, no tests."""
+    tests = (SCRIPTS / "tests").resolve()
+    return [path for path in powershell_sources()
+            if tests not in path.resolve().parents
+            and (SCRIPTS.resolve() in path.resolve().parents
+                 or COMFY.resolve() in path.resolve().parents)]
+
+
+class SystemQueryBoundLintTests(unittest.TestCase):
+    """No WMI call in the shipped scripts escapes the bound."""
+
+    def test_every_wmi_call_in_the_scripts_is_bounded(self):
+        sources = script_sources_for_the_wmi_rule()
+        self.assertIn(SCRIPTS / "lib" / "Common.ps1", sources)
+        sites = wmi_call_sites(sources)
+        self.assertEqual([], unbounded_wmi_offenders(sites))
+
+        found = {(site["file"], site["function"], site["name"]) for site in sites
+                 if site["bounded"]}
+        for required in SYSTEM_QUERY_REQUIRED_SITES:
+            self.assertIn(required, found,
+                          "the scan did not find {} bounded; it may be scanning nothing".format(
+                              required))
+        # Every exemption still names a real call site: an exemption for a call
+        # that has moved would silently exempt the next one written there.
+        present = {(site["file"], site["function"], site["name"]) for site in sites}
+        for allowed in SYSTEM_QUERY_UNBOUNDED_ALLOWED:
+            self.assertIn(allowed, present, "a stale exemption: {}".format(allowed))
+
+    def test_the_rule_fires_on_every_way_around_it(self):
+        """The scan proved against the mistakes it exists to catch.
+
+        Each case is written into a copy, in a directory of this test's own,
+        and only scanned -- never run.
+        """
+        workspace = make_temporary_directory(prefix="lc wmi lint ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        library = (SCRIPTS / "lib" / "Common.ps1").read_text(encoding="utf-8-sig")
+        strict = (SCRIPTS / "lib" / "StrictLan.ps1").read_text(encoding="utf-8-sig")
+        stop = (SCRIPTS / "stop.ps1").read_text(encoding="utf-8-sig")
+
+        def replaced_once(text, old, new):
+            self.assertEqual(1, text.count(old), "the anchor is not in the source once: " + old)
+            return text.replace(old, new)
+
+        cases = {
+            # The identity read taken back out of the wrapper.
+            "Common.ps1": (
+                replaced_once(
+                    library,
+                    "$info = @(Invoke-LcBoundedSystemQuery -What 'a process query (WMI)' "
+                    "-Arguments @{ ProcessId = $ProcessId } -Query {",
+                    "$info = @(& {"),
+                "not inside"),
+            # Inside the wrapper, but WMI itself is no longer asked for the bound.
+            "Common copy.ps1": (
+                replaced_once(
+                    library,
+                    " -OperationTimeoutSec $SystemQueryTimeoutSeconds -ErrorAction Stop |",
+                    " -ErrorAction Stop |"),
+                "carries no -OperationTimeoutSec"),
+            # A new call site, somewhere else entirely.
+            "stop.ps1": (stop + "\n$adapters = @(Get-NetAdapter -ErrorAction Stop)\n", "not inside"),
+            # A wrapper by another name is not the wrapper.
+            "stop copy.ps1": (
+                stop + "\n$r = Invoke-LcSystemQuery -Query { Get-NetRoute -ErrorAction Stop }\n",
+                "not inside"),
+            # The script block given, but not as -Query.
+            "stop third.ps1": (
+                stop + "\n$r = Invoke-LcBoundedSystemQuery -What 'x' -Arguments { Get-NetRoute }\n",
+                "not inside"),
+            # An exempt command outside the one function it is exempt in.
+            "StrictLan.ps1": (
+                strict + "\nfunction Invoke-LcSomethingElse {\n    New-NetFirewallRule -Name 'x'\n}\n",
+                "not inside"),
+            # A call through the invocation operator is still a call.
+            "stop fourth.ps1": (stop + "\n& 'Get-CimInstance' -ClassName Win32_OperatingSystem\n",
+                                "not inside"),
+        }
+        for name, (text, expected) in cases.items():
+            with self.subTest(case=name):
+                target = workspace / name
+                target.write_text(text, encoding="utf-8")
+                offenders = unbounded_wmi_offenders(wmi_call_sites([target]))
+                self.assertTrue(offenders, "the rule did not fire on " + name)
+                self.assertTrue(any(expected in offender for offender in offenders),
+                                "fired, but not for the right reason: {} -> {}".format(
+                                    name, offenders))
+
+    def test_the_unmodified_sources_pass_the_same_scan(self):
+        """The control for the test above: the copies differ only by the case."""
+        sites = wmi_call_sites([SCRIPTS / "lib" / "Common.ps1", SCRIPTS / "lib" / "StrictLan.ps1",
+                                SCRIPTS / "stop.ps1"])
+        self.assertEqual([], unbounded_wmi_offenders(sites))
+        self.assertTrue(sites, "the control found no WMI call at all")
+
+
+# ==========================================================================
+# Every WMI/CIM read is bounded, and an unanswered one proves nothing
+# ==========================================================================
+#
+# Get-CimInstance and the Get-Net* / Get-DnsClient* cmdlets wait on WMI, which
+# answers when it answers. The ownership identity read had no bound at all, so
+# a cold or wedged provider stalled start.ps1 on its record and stop.ps1 and
+# status.ps1 on their check, for as long as WMI chose. Every such read now goes
+# through Invoke-LcBoundedSystemQuery (lib/Common.ps1), under the one bound
+# below, and a read that is not answered in time is an unreadable identity:
+# "unproven", the record kept, nothing stopped.
+#
+# A WMI that never answers is simulated here, never produced: nothing in this
+# suite stops, restarts or loads a Windows service. A function named like the
+# cmdlet is defined ahead of the call, which PowerShell resolves before the
+# cmdlet -- the same seam the firewall tests use -- and its body is an
+# UNINTERRUPTIBLE sleep, so nothing but ending the process that runs it ends it.
+
+SYSTEM_QUERY_BOUND_SECONDS = 15
+# What a bounded read may take beyond the bound: the child PowerShell it runs
+# in has to start, and has to be ended. Measured on the development machine at
+# about two seconds; the margin is generous and still far below any stall.
+SYSTEM_QUERY_MARGIN_SECONDS = 10
+
+STALLED_CIM = (
+    "function Get-CimInstance {\n"
+    "    # Injected by the test suite: WMI never answers. Thread.Sleep and not\n"
+    "    # Start-Sleep, because a pipeline stop cannot interrupt it.\n"
+    "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+# A provider that honours -OperationTimeoutSec: asked with a bound, it gives up
+# and says so; asked without one, it never answers.
+CIM_HONOURING_ITS_TIMEOUT = (
+    "function Get-CimInstance {\n"
+    "    [CmdletBinding()] param([string]$ClassName, [string]$Filter, [int]$OperationTimeoutSec)\n"
+    "    # Injected by the test suite: a provider that honours its timeout.\n"
+    "    if ($PSBoundParameters.ContainsKey('OperationTimeoutSec')) {\n"
+    "        throw \"Injected: the WMI operation timed out after $OperationTimeoutSec seconds.\"\n"
+    "    }\n"
+    "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+STALLED_NET_IP_ADDRESS = (
+    "function Get-NetIPAddress {\n"
+    "    # Injected by the test suite: the adapter query never answers.\n"
+    "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+
+class SystemQueryBoundTests(MachineInterfaceTestCase):
+    """What the scripts do when Windows does not answer a WMI/CIM query.
+
+    The six rules of ownership hold with the query stalled exactly as they do
+    with it answered: a retained record survives while its process lives; a
+    process whose identity could not be read is not stopped; once the proof is
+    there again the ordinary stop.ps1 stops it; an unrelated process is never
+    stopped; a record whose start time or image disagrees is never ownership;
+    and a record is removed only when its process is proved gone. And nothing
+    waits for WMI longer than the bound.
+    """
+
+    def copy_scripts_with(self, shadow, label):
+        """A copy of the scripts whose library defines ``shadow`` at its end.
+
+        Appended, so it replaces nothing: it is simply the definition
+        PowerShell finds first for that command name. The copy lives in this
+        test's own workspace; the scripts this suite runs are not touched.
+        """
+        copied = self.workspace / "scripts {}".format(label)
+        shutil.copytree(SCRIPTS, copied, ignore=shutil.ignore_patterns("tests"))
+        library = copied / "lib" / "Common.ps1"
+        self.assertIn(Path(self.workspace).resolve(), library.resolve().parents,
+                      "refusing to write a shadow outside this test's workspace")
+        text = library.read_text(encoding="utf-8-sig")
+        library.write_text(text + "\n" + shadow, encoding="utf-8")
+        return copied
+
+    def owned_record(self, pid, **overrides):
+        record = {
+            "pid": pid,
+            "role": "comfy",
+            "start_time_utc_ticks": self.process_start_ticks(pid),
+            "image_path": sys.executable,
+            "owned_by": "localcanvas",
+        }
+        record.update(overrides)
+        return record
+
+    def identity_under(self, shadow, pid, timeout=SYSTEM_QUERY_BOUND_SECONDS + 45):
+        """Get-LcProcessIdentity's answer with ``shadow`` in force, and how long it took."""
+        result = self.run_powershell(
+            shadow +
+            "$watch = [System.Diagnostics.Stopwatch]::StartNew()\n"
+            "$identity = Get-LcProcessIdentity -ProcessId {}\n"
+            "$seconds = $watch.Elapsed.TotalSeconds\n"
+            "[pscustomobject]@{{\n"
+            "    Readable = [bool]$identity.Readable\n"
+            "    ExecutablePath = [string]$identity.ExecutablePath\n"
+            "    Reason = [string]$identity.Reason\n"
+            "    TimedOut = [bool]$(if ($identity.PSObject.Properties['TimedOut']) {{ $identity.TimedOut }} else {{ $false }})\n"
+            "    QueryFailed = [bool]$(if ($identity.PSObject.Properties['QueryFailed']) {{ $identity.QueryFailed }} else {{ $false }})\n"
+            "    Seconds = $seconds\n"
+            "}} | ConvertTo-Json -Compress\n".format(int(pid)),
+            timeout=timeout)
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        return json.loads(result.stdout)
+
+    def verdict_under(self, shadow, record, role="comfy"):
+        """Resolve-LcOwnedProcess's verdict on ``record`` with ``shadow`` in force."""
+        runtime = self.workspace / "decision runtime"
+        runtime.mkdir(exist_ok=True)
+        pid_file = runtime / "{}.pid".format(role)
+        pid_file.write_text(json.dumps(record), encoding="utf-8")
+        result = self.run_powershell(
+            shadow +
+            "$owned = Resolve-LcOwnedProcess -Role '{}'\n"
+            "[pscustomobject]@{{\n"
+            "    State = [string]$owned.State\n"
+            "    Reason = [string]$owned.Reason\n"
+            "}} | ConvertTo-Json -Compress\n".format(role),
+            runtime_dir=runtime, timeout=SYSTEM_QUERY_BOUND_SECONDS + 45)
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        verdict = json.loads(result.stdout)
+        verdict["record_after"] = json.loads(pid_file.read_text(encoding="utf-8")) \
+            if pid_file.exists() else None
+        return verdict
+
+    def assert_names_wmi_and_the_bound(self, text):
+        self.assertIn("WMI", text)
+        self.assertIn("within {} s".format(SYSTEM_QUERY_BOUND_SECONDS), text)
+
+    # -- the bound itself --------------------------------------------------
+
+    def test_the_bound_these_tests_use_is_the_librarys_own(self):
+        """A fixture that drifted from the library would prove nothing at all."""
+        text = (SCRIPTS / "lib" / "Common.ps1").read_text(encoding="utf-8-sig")
+        self.assertEqual(
+            1, len(re.findall(r"(?m)^\$script:SystemQueryTimeoutSeconds = {}$".format(
+                SYSTEM_QUERY_BOUND_SECONDS), text)),
+            "Common.ps1 does not define the bound these tests assume, exactly once")
+
+    def test_an_identity_read_windows_never_answers_is_unreadable_within_the_bound(self):
+        idle = self.start_idle_process()
+        identity = self.identity_under(STALLED_CIM, idle.pid)
+
+        self.assertFalse(identity["Readable"], identity)
+        self.assertEqual("", identity["ExecutablePath"])
+        self.assertTrue(identity["TimedOut"], identity)
+        self.assertTrue(identity["QueryFailed"], identity)
+        self.assertIn("PID {}".format(idle.pid), identity["Reason"])
+        self.assert_names_wmi_and_the_bound(identity["Reason"])
+        # It waited the bound -- the fixture really did stall -- and not
+        # appreciably longer.
+        self.assertGreaterEqual(identity["Seconds"], SYSTEM_QUERY_BOUND_SECONDS - 0.5, identity)
+        self.assertLess(identity["Seconds"],
+                        SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS, identity)
+        self.assertIsNone(idle.poll(), "reading an identity ended the process it was about")
+
+    def test_the_timeout_is_also_asked_of_wmi_itself(self):
+        """-OperationTimeoutSec is passed, carrying the same bound.
+
+        A provider that honours it gives up on its own, well inside the bound,
+        and that failure is an unreadable identity too -- never proof.
+        """
+        idle = self.start_idle_process()
+        identity = self.identity_under(CIM_HONOURING_ITS_TIMEOUT, idle.pid)
+
+        self.assertFalse(identity["Readable"], identity)
+        self.assertTrue(identity["QueryFailed"], identity)
+        self.assertFalse(identity["TimedOut"], identity)
+        self.assertIn(
+            "timed out after {} seconds".format(SYSTEM_QUERY_BOUND_SECONDS), identity["Reason"])
+        self.assertLess(identity["Seconds"], SYSTEM_QUERY_BOUND_SECONDS, identity)
+
+    def test_the_lan_address_query_windows_never_answers_falls_back_within_the_bound(self):
+        result = self.run_powershell(
+            STALLED_NET_IP_ADDRESS +
+            "$watch = [System.Diagnostics.Stopwatch]::StartNew()\n"
+            "$address = Get-LcLanAddress\n"
+            "$seconds = $watch.Elapsed.TotalSeconds\n"
+            "$dns = @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |\n"
+            "    Where-Object { $_.AddressFamily -eq 'InterNetwork' -and $_.ToString() -notlike '127.*' -and\n"
+            "        $_.ToString() -notlike '169.254.*' } | Select-Object -First 1)\n"
+            "[pscustomobject]@{\n"
+            "    Address = [string]$address\n"
+            "    Dns = $(if ($dns) { $dns[0].ToString() } else { '' })\n"
+            "    Seconds = $seconds\n"
+            "} | ConvertTo-Json -Compress\n",
+            timeout=SYSTEM_QUERY_BOUND_SECONDS + 45)
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        answer = json.loads(result.stdout.strip().splitlines()[-1])
+        # The fallback it always had, and nothing else: the DNS answer.
+        self.assertEqual(answer["Dns"], answer["Address"], output)
+        self.assertIn("[WARN] Windows did not answer a network address query within {} s".format(
+            SYSTEM_QUERY_BOUND_SECONDS), output)
+        self.assertGreaterEqual(answer["Seconds"], SYSTEM_QUERY_BOUND_SECONDS - 0.5, answer)
+        self.assertLess(answer["Seconds"],
+                        SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS, answer)
+
+    # -- a timeout is never proof ------------------------------------------
+
+    def test_a_timed_out_identity_is_unproven_however_well_the_record_matches(self):
+        """Rules 2 and 5: nothing about a record is ownership without an answer.
+
+        The record matching in every particular, and the two ways a reused PID
+        disagrees -- another start time, another executable -- all come out
+        the same: unproven, never running, and the record kept.
+        """
+        idle = self.start_idle_process()
+        records = {
+            "matching": self.owned_record(idle.pid),
+            "other start time": self.owned_record(idle.pid, start_time_utc_ticks=637000000000000000),
+            "other executable": self.owned_record(idle.pid, image_path=r"C:\another install\python.exe"),
+        }
+        for label, record in records.items():
+            with self.subTest(record=label):
+                verdict = self.verdict_under(STALLED_CIM, record)
+                self.assertEqual("unproven", verdict["State"], verdict)
+                self.assert_names_wmi_and_the_bound(verdict["Reason"])
+                self.assertEqual(record, verdict["record_after"], "the decision changed the record")
+        self.assertIsNone(idle.poll())
+
+    # -- stop.ps1 ----------------------------------------------------------
+
+    def test_an_owned_process_windows_will_not_identify_is_kept_then_stopped_once_proved(self):
+        """Rules 1, 2 and 3 through the real scripts.
+
+        start.ps1 launches and records ComfyUI and the gateway. With WMI not
+        answering, stop.ps1 stops neither, keeps both records unchanged, and
+        says why -- inside the bound per record. With WMI answering again, the
+        ordinary stop.ps1 stops both by those same records.
+        """
+        self.write_config()
+        start = self.run_script("start.ps1")
+        self.assertEqual(0, start.returncode, self.output_of(start))
+        comfy = self.read_pid_file("comfy")
+        gateway = self.read_pid_file("gateway")
+        self.assertIsNotNone(comfy)
+        self.assertIsNotNone(gateway)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        began = time.monotonic()
+        first = self.run_script("stop.ps1", script_dir=stalled, timeout=170)
+        took = time.monotonic() - began
+        output = self.output_of(first)
+        self.assertEqual(0, first.returncode, output)
+        self.assert_no_stack_trace(output)
+        for record in (comfy, gateway):
+            self.assertIn("could not prove it owns PID {}".format(record["pid"]), output)
+            self.assertIn("PID {} is still running and was NOT stopped.".format(record["pid"]), output)
+            self.assertTrue(self.alive(record["pid"]), output)
+        self.assert_names_wmi_and_the_bound(output)
+        self.assertEqual(comfy, self.read_pid_file("comfy"))
+        self.assertEqual(gateway, self.read_pid_file("gateway"))
+        # Two records, one bounded read each, and the rest of stop.ps1.
+        self.assertLess(took, 2 * (SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS) + 30,
+                        output)
+
+        second = self.run_script("stop.ps1")
+        output = self.output_of(second)
+        self.assertEqual(0, second.returncode, output)
+        self.assertIn("ComfyUI stopped (PID {}".format(comfy["pid"]), output)
+        for record in (comfy, gateway):
+            self.assertTrue(wait_until(lambda: not self.alive(record["pid"]), 20), output)
+        self.assertIsNone(self.read_pid_file("comfy"))
+        self.assertIsNone(self.read_pid_file("gateway"))
+
+    def test_an_unrelated_process_is_never_stopped_while_windows_does_not_answer(self):
+        """Rule 4: a record naming somebody else's process, WMI stalled.
+
+        Whatever the record says, the process it names is not stopped and the
+        record, which proves nothing either way, is kept.
+        """
+        unrelated = self.start_idle_process()
+        self.write_config()
+        record = self.owned_record(unrelated.pid, image_path=r"C:\another install\python.exe")
+        self.write_pid_file("comfy", record)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        result = self.run_script("stop.ps1", script_dir=stalled, timeout=120)
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertIsNone(unrelated.poll(), "stop.ps1 stopped a process it could not identify")
+        self.assertIn("could not prove it owns PID {}".format(unrelated.pid), output)
+        self.assertEqual(record, self.read_pid_file("comfy"))
+
+    def test_a_record_is_removed_only_once_its_process_is_proved_gone(self):
+        """Rule 6, with WMI stalled throughout.
+
+        While the process lives, the record stays. Once it has exited -- which
+        the PID lookup proves without asking WMI -- the record goes.
+        """
+        idle = self.start_idle_process()
+        self.write_config()
+        record = self.owned_record(idle.pid)
+        self.write_pid_file("comfy", record)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        kept = self.run_script("stop.ps1", script_dir=stalled, timeout=120)
+        self.assertEqual(0, kept.returncode, self.output_of(kept))
+        self.assertEqual(record, self.read_pid_file("comfy"), self.output_of(kept))
+        self.assertIsNone(idle.poll())
+
+        # The harness ends its own process, by the handle it holds.
+        idle.kill()
+        idle.wait(timeout=15)
+        self.assertTrue(wait_until(lambda: not self.alive(idle.pid), 20))
+
+        removed = self.run_script("stop.ps1", script_dir=stalled, timeout=120)
+        output = self.output_of(removed)
+        self.assertEqual(0, removed.returncode, output)
+        self.assertIn("stale PID file removed", output)
+        self.assertIsNone(self.read_pid_file("comfy"))
+
+    # -- start.ps1 ---------------------------------------------------------
+
+    def test_start_finishes_when_windows_never_answers_the_identity_query(self):
+        """The stall this bound exists for, through start.ps1.
+
+        ComfyUI's record is written without the identity it could not read,
+        and start.ps1 says so. The gateway's cannot be written with it either,
+        and that is the save-failure path: the gateway this run launched is
+        stopped by the handle start.ps1 holds, and start.ps1 exits 5 naming
+        WMI and the bound -- instead of never exiting at all.
+        """
+        self.write_config()
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        began = time.monotonic()
+        result, document = self.run_json("start.ps1", script_dir=stalled, timeout=170)
+        took = time.monotonic() - began
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+
+        comfy = self.read_pid_file("comfy")
+        self.assertIsNotNone(comfy, output)
+        self.assertEqual("", comfy["image_path"], output)
+        self.assertIn("The identity of PID {} could not be read".format(comfy["pid"]), output)
+
+        error = document["error"]
+        self.assertEqual("The gateway's ownership record could not be written", error["what"], output)
+        self.assertIn("Windows did not answer a process query (WMI) within {} s".format(
+            SYSTEM_QUERY_BOUND_SECONDS), error["detail"])
+        self.assertIn("was stopped", error["detail"])
+        self.assertIn("WMI", error["fix"])
+        self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
+        self.assertEqual("failed", document["gateway"]["status"])
+        self.assertIsNone(self.read_pid_file("gateway"))
+        launched = self.launched_gateway_pids()
+        self.assertEqual(1, len(launched), output)
+        self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                        "the gateway this run launched is still running with no record")
+        # ComfyUI's read and the gateway's, each bounded, and the rest of start.
+        self.assertLess(took, 2 * (SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS) + 60,
+                        output)
+
+    def test_start_finishes_when_windows_never_answers_the_lan_address_query(self):
+        """The wildcard-bind path a user runs daily, with the adapter query stalled."""
+        self.write_config(gateway_host="0.0.0.0")
+        stalled = self.copy_scripts_with(STALLED_NET_IP_ADDRESS, "with the adapter query stalled")
+
+        result = self.run_script("start.ps1", script_dir=stalled, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        self.assertIn("[WARN] Windows did not answer a network address query within {} s".format(
+            SYSTEM_QUERY_BOUND_SECONDS), output)
+        self.assertIsNotNone(self.read_pid_file("gateway"), output)
+
+
+class ScriptTimeoutReportTests(ScriptTestCase):
+    """A script run that passes its bound says what it had printed.
+
+    Without it a stall reports "timed out after 180 seconds" and nothing else,
+    which is the one fact that does not say where it stalled.
+    """
+
+    def test_a_timed_out_script_reports_its_partial_output(self):
+        folder = self.workspace / "slow scripts"
+        folder.mkdir()
+        (folder / "slow.ps1").write_text(
+            "param([string]$Config, [string]$PythonExe, [string]$WorkflowSources)\n"
+            "Write-Output 'reached the step before the stall'\n"
+            "[Console]::Error.WriteLine('said on standard error before the stall')\n"
+            "Start-Sleep -Seconds 120\n",
+            encoding="utf-8")
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            self.run_script("slow.ps1", script_dir=folder, timeout=10)
+        report = str(raised.exception)
+        self.assertIn("reached the step before the stall", report)
+        self.assertIn("said on standard error before the stall", report)
+
+
 class GatewayRecordLifecycleTests(MachineInterfaceTestCase):
     """The gateway's ownership record outlives the gateway, never the other way round.
 
@@ -25818,12 +26478,12 @@ CI_GROUPS = {
         "ProcessOwnershipLintTests", "InlineCodeQuoteLintTests", "ReadinessContractTests",
         "ConfigurationTests", "ConfigurationSeamTests", "EndpointOwnershipTests",
         "ManagedModeTests", "ChildStreamEncodingTests", "ComponentTests", "GatewayPortCheckTests",
-        "GatewayRecordLifecycleTests",
+        "GatewayRecordLifecycleTests", "SystemQueryBoundLintTests", "ScriptTimeoutReportTests",
     ],
     "runtime-stop": [
         "RedirectedChildLaunchTests", "ExternalModeTests", "StopTests", "ProcessIdentityTests",
         "OwnershipDecisionTests", "RuntimeDirectoryTests", "StatusTests",
-        "GatewayIdentityTests", "JsonDocumentTests",
+        "GatewayIdentityTests", "JsonDocumentTests", "SystemQueryBoundTests",
     ],
     "runtime-ownership": [
         "OwnershipRecordLifecycleTests", "UnidentifiedGatewayTests",
