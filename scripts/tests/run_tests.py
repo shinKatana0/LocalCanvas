@@ -26058,6 +26058,18 @@ STALLED_NET_IP_ADDRESS = (
     "}\n")
 
 
+def stalled_stop_limit(records):
+    """The harness limit for a stop.ps1 run whose identity reads all stall.
+
+    Derived from stop.ps1's own bounds so a slow run that is still inside
+    them fails a timing assertion with its output, instead of being cut off
+    as if it had hung: pwsh start-up allowance (60 s) + the configuration
+    read (120 s) + its drain (30 s) + per record one bounded identity read
+    and its child start-up (SYSTEM_QUERY_BOUND_SECONDS + 30 s) + 3 s.
+    """
+    return 60 + 120 + 30 + records * (SYSTEM_QUERY_BOUND_SECONDS + 30) + 3
+
+
 class SystemQueryBoundTests(MachineInterfaceTestCase):
     """What the scripts do when Windows does not answer a WMI/CIM query.
 
@@ -26252,7 +26264,7 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
 
         began = time.monotonic()
-        first = self.run_script("stop.ps1", script_dir=stalled, timeout=170)
+        first = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(2))
         took = time.monotonic() - began
         output = self.output_of(first)
         self.assertEqual(0, first.returncode, output)
@@ -26289,7 +26301,7 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         self.write_pid_file("comfy", record)
         stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
 
-        result = self.run_script("stop.ps1", script_dir=stalled, timeout=120)
+        result = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(1))
         output = self.output_of(result)
         self.assertEqual(0, result.returncode, output)
         self.assertIsNone(unrelated.poll(), "stop.ps1 stopped a process it could not identify")
@@ -26308,7 +26320,7 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         self.write_pid_file("comfy", record)
         stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
 
-        kept = self.run_script("stop.ps1", script_dir=stalled, timeout=120)
+        kept = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(1))
         self.assertEqual(0, kept.returncode, self.output_of(kept))
         self.assertEqual(record, self.read_pid_file("comfy"), self.output_of(kept))
         self.assertIsNone(idle.poll())
@@ -26318,7 +26330,7 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         idle.wait(timeout=15)
         self.assertTrue(wait_until(lambda: not self.alive(idle.pid), 20))
 
-        removed = self.run_script("stop.ps1", script_dir=stalled, timeout=120)
+        removed = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(1))
         output = self.output_of(removed)
         self.assertEqual(0, removed.returncode, output)
         self.assertIn("stale PID file removed", output)
