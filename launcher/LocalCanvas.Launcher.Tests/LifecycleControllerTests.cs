@@ -753,6 +753,8 @@ public sealed class SessionEndTests
         var stop = harness.Runtime.Calls[before];
         Assert.Empty(stop.Arguments);
         Assert.InRange(stop.Timeout, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10));
+        // The confirmation ends a second inside the budget, so its report is written in time.
+        Assert.True(harness.Runtime.Calls[before + 1].Timeout <= TimeSpan.FromSeconds(9), $"status.ps1 was given {harness.Runtime.Calls[before + 1].Timeout}");
         Assert.Contains(harness.Log.Lines, line => line == "exit: everything LocalCanvas started has stopped (confirmed by status.ps1)");
         Assert.True(controller.Completion.IsCompleted);
     }

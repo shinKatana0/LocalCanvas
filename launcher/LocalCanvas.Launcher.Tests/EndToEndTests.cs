@@ -498,7 +498,9 @@ internal sealed class RecordingRunner(IScriptRunner inner, string slowFlag) : IS
         return outcome;
     }
 
-    public DateTime When(string what) => Timeline.First(entry => entry.What == what).At;
+    public DateTime When(string what) =>
+        Timeline.Where(entry => entry.What == what).Select(entry => (DateTime?)entry.At).FirstOrDefault()
+        ?? throw new InvalidOperationException($"No \"{what}\" in the timeline: " + string.Join(" | ", Timeline.Select(entry => entry.What)));
 }
 
 /// <summary>Stopping never runs beside a start that is still in flight -- on the real scripts.</summary>
@@ -559,26 +561,47 @@ public sealed class InFlightEndToEndTests
         var finished = await Task.Run(() => controller.EndSession(LifecycleController.DefaultSessionEndBound));
         var took = clock.Elapsed;
 
-        // Whatever the budget allowed, the start that was in flight ends by itself.
+        // Whatever the budget allowed, the start that was in flight ends by itself...
         Assert.NotNull(runner.GatewayStartStillRunning);
         await runner.GatewayStartStillRunning!.WaitAsync(TimeSpan.FromSeconds(90));
+        // ...and the exit sequence finishes writing its report. EndSession returns
+        // at the bound; a sequence that reached the bound is still writing, and
+        // reading the log before it has finished reads half a report.
+        await controller.Completion.WaitAsync(TimeSpan.FromSeconds(90));
         var log = File.ReadAllText(site.Log.Location);
         TestContext.Current.TestOutputHelper?.WriteLine(
             $"session end took {took.TotalSeconds:0.0} s (finished within the bound: {finished}); start ran " +
             $"{(runner.When("ended start.ps1 -Component Gateway -Json") - runner.When("start start.ps1 -Component Gateway -Json")).TotalSeconds:0.0} s");
 
-        // The invariants: stop.ps1 only after the start's process ended...
-        Assert.True(runner.When("start stop.ps1 -Json") >= runner.When("ended start.ps1 -Component Gateway -Json"),
-            "stop.ps1 ran while the Gateway start was still in flight");
-        // ...no Gateway left afterwards: no process the stub launched, no record, the port silent...
-        await AssertNoGatewayLeftAsync(site);
-        Assert.False(PortAnswers(site.GatewayPort), $"port {site.GatewayPort} still accepts connections");
-        // ...and the log is truthful: confirmed by status.ps1, or plainly not confirmed. Never a bare claim.
-        var confirmed = log.Contains("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)", StringComparison.Ordinal);
-        var unconfirmed = log.Contains("What is still running could not be confirmed", StringComparison.Ordinal);
-        TestContext.Current.TestOutputHelper?.WriteLine(confirmed ? "outcome: confirmed by status.ps1" : unconfirmed ? "outcome: truthfully not confirmed" : "outcome: neither");
-        Assert.True(confirmed || unconfirmed, log);
+        // Never a bare claim of a clean stop, whichever way the session end went.
         Assert.DoesNotContain("exit: everything LocalCanvas started has stopped\n", log.Replace("\r\n", "\n", StringComparison.Ordinal), StringComparison.Ordinal);
+        var stopRan = runner.Timeline.Any(entry => entry.What == "start stop.ps1 -Json");
+        if (stopRan)
+        {
+            // The start ended within the budget. stop.ps1 ran only after its
+            // process ended...
+            Assert.True(runner.When("start stop.ps1 -Json") >= runner.When("ended start.ps1 -Component Gateway -Json"),
+                "stop.ps1 ran while the Gateway start was still in flight");
+            // ...no Gateway is left: no process the stub launched, no record, the port silent...
+            await AssertNoGatewayLeftAsync(site);
+            Assert.False(PortAnswers(site.GatewayPort), $"port {site.GatewayPort} still accepts connections");
+            // ...and the log is truthful: confirmed by status.ps1, or plainly not confirmed.
+            var confirmed = log.Contains("exit: everything LocalCanvas started has stopped (confirmed by status.ps1)", StringComparison.Ordinal);
+            var unconfirmed = log.Contains("What is still running could not be confirmed", StringComparison.Ordinal);
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                "branch: stopped after the start ended; outcome: " + (confirmed ? "confirmed by status.ps1" : unconfirmed ? "truthfully not confirmed" : "neither"));
+            Assert.True(confirmed || unconfirmed, log);
+        }
+        else
+        {
+            // The whole budget passed with the start still running (a machine
+            // slow enough for that). Then nothing may be stopped beside it,
+            // and the log has to say exactly that -- what the start goes on to
+            // create is left, and the user is told.
+            TestContext.Current.TestOutputHelper?.WriteLine("branch: the budget ran out with the start still running; nothing was stopped beside it");
+            Assert.Contains("is still running; stop.ps1 is not run beside it", log, StringComparison.Ordinal);
+            Assert.Contains("was still running, so stop.ps1 was not run beside it", log, StringComparison.Ordinal);
+        }
     }
 
     private static bool PortAnswers(int port)
