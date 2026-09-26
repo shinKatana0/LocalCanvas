@@ -1251,7 +1251,10 @@ public sealed class LifecycleController : IAsyncDisposable
     private async Task<(bool Confirmed, List<string> Leftovers, string? Why)> ConfirmWithStatusAsync(ExitMode mode)
     {
         var leftovers = new List<string>();
-        var timeout = mode == ExitMode.SessionEnd ? SessionRemaining : LauncherCalls.StatusTimeout;
+        // At a session end the confirmation ends a second before the budget does,
+        // so that its result -- or the plain statement that there is none -- is
+        // written while the launcher is still allowed to write it.
+        var timeout = mode == ExitMode.SessionEnd ? SessionRemaining - TimeSpan.FromSeconds(1) : LauncherCalls.StatusTimeout;
         if (timeout < TimeSpan.FromSeconds(1))
         {
             return (false, leftovers, "no time was left in the session to run status.ps1.");

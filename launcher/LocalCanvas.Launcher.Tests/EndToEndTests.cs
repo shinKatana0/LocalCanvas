@@ -561,9 +561,13 @@ public sealed class InFlightEndToEndTests
         var finished = await Task.Run(() => controller.EndSession(LifecycleController.DefaultSessionEndBound));
         var took = clock.Elapsed;
 
-        // Whatever the budget allowed, the start that was in flight ends by itself.
+        // Whatever the budget allowed, the start that was in flight ends by itself...
         Assert.NotNull(runner.GatewayStartStillRunning);
         await runner.GatewayStartStillRunning!.WaitAsync(TimeSpan.FromSeconds(90));
+        // ...and the exit sequence finishes writing its report. EndSession returns
+        // at the bound; a sequence that reached the bound is still writing, and
+        // reading the log before it has finished reads half a report.
+        await controller.Completion.WaitAsync(TimeSpan.FromSeconds(90));
         var log = File.ReadAllText(site.Log.Location);
         TestContext.Current.TestOutputHelper?.WriteLine(
             $"session end took {took.TotalSeconds:0.0} s (finished within the bound: {finished}); start ran " +
