@@ -73,6 +73,13 @@
     presentation keys that a normal run would have kept were replaced. With
     -DryRun it says what would be replaced and writes nothing.
 
+.PARAMETER Json
+    Print exactly one compact JSON document on standard output -- the counts,
+    the changes and attention start.ps1 would act on, the workflows that need
+    a look, and how many definitions were written -- and every human line on
+    standard error. Not the engine's whole report. Exit codes are unchanged
+    (docs/runtime.md, "Machine interface").
+
 .EXAMPLE
     .\scripts\sync-workflows.ps1 -DryRun
 
@@ -86,12 +93,14 @@ param(
     [string]$PythonExe,
     [switch]$NoConvert,
     [switch]$DryRun,
-    [switch]$RegenerateLabels
+    [switch]$RegenerateLabels,
+    [switch]$Json
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\Common.ps1')
+if ($Json) { Enable-LcMachineOutput }
 
 $EXIT_OK = 0
 $EXIT_UNEXPECTED = 1
@@ -101,6 +110,79 @@ $EXIT_ATTENTION = 3
 $repoRoot = Get-LcRepoRoot
 if (-not $Config) { $Config = Join-Path $repoRoot 'config\local\workflow-sources.yaml' }
 if (-not $RuntimeConfig) { $RuntimeConfig = Join-Path $repoRoot 'config\local\runtime.yaml' }
+
+# The engine's report, once there is one: what a -Json document is made from.
+$report = $null
+# How many of the workflows that need a look a -Json document lists by name.
+# The engine's own report lists every one of them, and can run to megabytes.
+$AttentionItemsCap = 50
+# How much of the engine's own exit-2 text a -Json error carries: lines, and
+# characters per line. Its whole text is on standard error regardless.
+$EngineDetailLines = 40
+$EngineLineChars = 500
+
+function Complete-Run {
+    <#
+        Every way out of this script, so that a -Json run prints its one
+        document on every path.
+
+        ok is true when the sync ran -- exit 0, or 3, where it ran and some
+        workflows need a look, which is not a failure (docs/runtime.md). Its
+        "changes" and "attention" come from Measure-LcWorkflowReport, the
+        arithmetic start.ps1's check uses, so the two can never disagree.
+    #>
+    param([Parameter(Mandatory)][int]$Code)
+    if ($Json) {
+        try {
+            $ran = $Code -in @($EXIT_OK, $EXIT_ATTENTION)
+            $document = New-LcResultDocument -ExitCode $Code -Ok $ran
+            $document['dry_run'] = [bool]$DryRun
+            $document['no_convert'] = [bool]$NoConvert
+            $counts = $null
+            $editor = $null
+            $measured = $null
+            $items = @()
+            $itemsTotal = 0
+            $written = $null
+            $summary = $null
+            if ($null -ne $report) {
+                $counts = Get-LcSaid $report 'counts'
+                $editor = Get-LcSaid $report 'unconverted_editor'
+                $measured = Measure-LcWorkflowReport -Report $report
+                $attentionList = @(Get-LcSaidList $report 'attention')
+                $itemsTotal = $attentionList.Count
+                foreach ($item in ($attentionList | Select-Object -First $AttentionItemsCap)) {
+                    $reason = [string](Get-LcSaid $item 'reason')
+                    $items += , ([ordered]@{
+                            id     = Get-LcSaid $item 'id'
+                            state  = Get-LcSaid $item 'state'
+                            # One line: the first line of the engine's own sentence.
+                            reason = $(if ($reason) { ($reason -split "`r?`n")[0].Trim() } else { $null })
+                        })
+                }
+                $definitions = Get-LcSaid $report 'definitions'
+                if ($null -ne $definitions) { $written = Get-LcSaid $definitions 'written' }
+                $summary = Get-LcSaid $report 'summary'
+            }
+            $document['counts'] = $counts
+            $document['unconverted_editor'] = $editor
+            $document['changes'] = $(if ($null -ne $measured) { $measured.Changes } else { $null })
+            $document['attention'] = $(if ($null -ne $measured) { $measured.Attention } else { $null })
+            $document['new'] = $(if ($null -ne $measured) { $measured.New } else { $null })
+            $document['changed'] = $(if ($null -ne $measured) { $measured.Changed } else { $null })
+            $document['retry'] = $(if ($null -ne $measured) { $measured.Retry } else { $null })
+            $document['removed'] = $(if ($null -ne $measured) { $measured.Removed } else { $null })
+            $document['attention_items'] = $items
+            $document['attention_items_total'] = $itemsTotal
+            $document['definitions_written'] = $written
+            $document['summary'] = $summary
+            Write-LcResultDocument -Document $document
+        } catch {
+            Write-LcResultFallback -ExitCode $Code -Reason "$($_.Exception.Message)"
+        }
+    }
+    exit $Code
+}
 
 function Test-LcTerminalCanWrite {
     <#
@@ -171,11 +253,44 @@ function Write-EngineLines {
         $text = "$line".TrimEnd()
         if (-not $text.Trim()) { continue }
         if ($text -match '^\s*\[(?:FAIL|WARN|INFO| OK )\]') {
-            Write-Host $text.Trim()
+            Write-LcLine $text.Trim()
         } else {
             Write-LcDetail $text.Trim()
         }
     }
+}
+
+function Get-LcEngineFailure {
+    <#
+        The engine's exit-2 lines as a -Json error: What is its first [FAIL]
+        line without the tag (or its first line, when it wrote no tag), and
+        Detail is every line it wrote, trimmed, in order.
+
+        Bounded, because the lines are the engine's and their length is not
+        this script's to assume: at most $EngineDetailLines lines of at most
+        $EngineLineChars characters each, with a line saying how many more
+        are on standard error. The [INVENTORY_NOT_WRITTEN] marker is a signal
+        for this script, not a sentence for a reader, and is left out -- the
+        closing sentence the caller adds says what it means.
+    #>
+    param([string[]]$Lines)
+    $said = @(@($Lines) | ForEach-Object { "$_".Trim() } |
+            Where-Object { $_ -and $_ -cne '[INVENTORY_NOT_WRITTEN]' })
+    $cut = {
+        param([string]$Text)
+        if ($Text.Length -le $EngineLineChars) { return $Text }
+        return $Text.Substring(0, $EngineLineChars - 3) + '...'
+    }
+    $first = @($said | Where-Object { $_ -match '^\[FAIL\]' } | Select-Object -First 1)
+    $what = ''
+    if ($first.Count -gt 0) { $what = ($first[0] -replace '^\[FAIL\]\s*', '').Trim() }
+    if (-not $what -and $said.Count -gt 0) { $what = $said[0] }
+    if (-not $what) { $what = 'The sync could not be started' }
+    $detail = @($said | Select-Object -First $EngineDetailLines | ForEach-Object { & $cut $_ })
+    if ($said.Count -gt $EngineDetailLines) {
+        $detail += "... and $($said.Count - $EngineDetailLines) more line(s), on standard error"
+    }
+    return [pscustomobject]@{ What = (& $cut $what); Detail = $detail }
 }
 
 try {
@@ -194,11 +309,11 @@ try {
         Write-LcFailure -What 'The LocalCanvas Python interpreter was not found' -Detail @(
             "Expected an interpreter at: $expectedPython") `
             -Fix 'Run scripts\setup.ps1 to create .venv and install the gateway into it.'
-        exit $EXIT_CONFIG
+        Complete-Run $EXIT_CONFIG
     }
     Write-LcDetail "Interpreter: $python"
     Write-LcDetail "Configuration: $Config"
-    Write-Host ''
+    Write-LcLine ''
 
     # ------------------------------------------------------------------
     # No source list at all: the beginner's case, answered with a command
@@ -219,7 +334,7 @@ try {
         Write-LcFailure -What 'No workflow folder is configured yet' -Detail $detail `
             -Fix ("Point LocalCanvas at the folder your ComfyUI workflows are saved in: " +
                 "pwsh .\scripts\setup.ps1 -WorkflowSource '<your workflow folder>'")
-        exit $EXIT_CONFIG
+        Complete-Run $EXIT_CONFIG
     }
 
     # ------------------------------------------------------------------
@@ -277,7 +392,7 @@ try {
                 "Ran: $python $($arguments -join ' ')")
         }
         Write-EngineLines -Lines $said
-        Write-Host ''
+        Write-LcLine ''
         # Two kinds of exit 2, and the closing sentence has to be true for the
         # one this is (T-0225). Every cause is found before the engine writes
         # anything -- except an inventory that could not be written, which the
@@ -287,12 +402,19 @@ try {
         $inventoryNotWritten = @($stderr | Where-Object {
                 $_ -and $_.Trim() -ceq '[INVENTORY_NOT_WRITTEN]' }).Count -gt 0
         if ($inventoryNotWritten) {
-            Write-LcDetail 'The inventory was not written, but definitions, imported workflow graphs and conversion snapshots this run wrote may already be on disk. The next successful sync will record them.'
+            $closing = 'The inventory was not written, but definitions, imported workflow graphs and conversion snapshots this run wrote may already be on disk. The next successful sync will record them.'
         } else {
-            Write-LcDetail 'No file was written.'
+            $closing = 'No file was written.'
         }
-        Write-Host ''
-        exit $EXIT_CONFIG
+        Write-LcDetail $closing
+        Write-LcLine ''
+        # The document's error is the engine's own words, not "Exited with
+        # code 2": the lines above are the only description of what is wrong,
+        # and a caller showing error.detail has nothing else to show. Recorded
+        # without printing -- the terminal already has them, verbatim.
+        $failure = Get-LcEngineFailure -Lines $said
+        Set-LcLastFailure -What $failure.What -Detail (@($failure.Detail) + @($closing))
+        Complete-Run $EXIT_CONFIG
     }
 
     $document = ($stdout -join "`n").Trim()
@@ -301,13 +423,13 @@ try {
             @("Ran: $python $($arguments -join ' ')", "Exit code: $exitCode") +
             @($stderr | Where-Object { $_ -and $_.Trim() })) `
             -Fix 'Run scripts\doctor.ps1 to check the installation.'
-        exit $EXIT_UNEXPECTED
+        Complete-Run $EXIT_UNEXPECTED
     }
     if (-not $document) {
         Write-LcFailure -What 'The sync engine printed nothing' -Detail @(
             "Ran: $python $($arguments -join ' ')") `
             -Fix 'Run scripts\setup.ps1 to reinstall the gateway into .venv.'
-        exit $EXIT_UNEXPECTED
+        Complete-Run $EXIT_UNEXPECTED
     }
     try {
         $report = $document | ConvertFrom-Json -ErrorAction Stop
@@ -316,7 +438,7 @@ try {
             @("Ran: $python $($arguments -join ' ')") +
             @($document -split "`r?`n" | Select-Object -First 5)) `
             -Fix 'Run scripts\setup.ps1 to reinstall the gateway into .venv.'
-        exit $EXIT_UNEXPECTED
+        Complete-Run $EXIT_UNEXPECTED
     }
 
     # ------------------------------------------------------------------
@@ -342,7 +464,7 @@ try {
     } else {
         Write-LcWarn $report.summary
         foreach ($item in $attention) {
-            Write-Host ''
+            Write-LcLine ''
             Write-LcWarn "$($item.state)  $($item.id)"
             if ($item.source_path) { Write-LcDetail "$($item.source_path)" }
             # The deterministic category, when there is one: a token a person
@@ -373,7 +495,7 @@ try {
         $failed = [int](Get-LcSaid $counts 'failed')
         $unavailable = [int](Get-LcSaid $counts 'unavailable')
         if (($converted + $reused + $failed + $unavailable) -gt 0) {
-            Write-Host ''
+            Write-LcLine ''
             Write-LcInfo 'Converted by ComfyUI'
             Write-LcDetail ("{0} converted, {1} reused from an earlier run, {2} refused, {3} not attempted" -f
                 $converted, $reused, $failed, $unavailable)
@@ -393,7 +515,7 @@ try {
         }
     }
 
-    Write-Host ''
+    Write-LcLine ''
     if ($report.inventory.written) {
         Write-LcInfo "Inventory: $($report.inventory.path)"
     } else {
@@ -428,7 +550,7 @@ try {
             @('locked', 'technical') -contains (Get-LcSaid $_ 'section') })
         if ($null -eq $definition -and $hidden.Count -eq 0) { continue }
 
-        Write-Host ''
+        Write-LcLine ''
         Write-LcInfo "$(Get-LcSaid $item 'id')"
         if ($null -ne $definition) {
             $path = Get-LcSaid $definition 'path'
@@ -456,7 +578,7 @@ try {
     }
 
     if ($report.dry_run) {
-        Write-Host ''
+        Write-LcLine ''
         # The engine's sentence, verbatim. There is exactly one copy of it, in
         # Python, where it is tested; both forms of it come from there, and all
         # that is decided here is which one this terminal can actually draw.
@@ -464,15 +586,15 @@ try {
         if (-not (Test-LcTerminalCanWrite $notice)) {
             $notice = [string]$report.notice_ascii
         }
-        Write-Host $notice
+        Write-LcLine $notice
     }
-    Write-Host ''
+    Write-LcLine ''
 
-    if ($attention.Count -gt 0) { exit $EXIT_ATTENTION }
-    exit $EXIT_OK
+    if ($attention.Count -gt 0) { Complete-Run $EXIT_ATTENTION }
+    Complete-Run $EXIT_OK
 } catch {
     Write-LcFailure -What 'The workflow sync could not be completed' -Detail @("$($_.Exception.Message)") `
         -Fix "Check that $Config exists and is valid, and run scripts\doctor.ps1." `
         -ErrorRecord $_
-    exit $EXIT_UNEXPECTED
+    Complete-Run $EXIT_UNEXPECTED
 }

@@ -221,6 +221,15 @@ from `.Path` or `MainModule.FileName`, which resolve through the main module and
 were measured returning `ntdll.dll` for a ComfyUI that had been serving for
 minutes. A wrong answer is worse than none, because it is acted upon.
 
+**Windows gets 15 seconds to answer:** that query, like every WMI/CIM read the
+scripts make, is bounded by one constant (`$script:SystemQueryTimeoutSeconds` in
+`scripts/lib/Common.ps1`), and an identity not answered within it is unreadable,
+so the record is **unproven** — kept, and nothing is stopped. A process
+`start.ps1` has *just launched* is never recorded that way: when its identity
+cannot be read, `start.ps1` stops it by the handle it holds and fails (exit 3 for
+ComfyUI, 5 for the gateway), so it never leaves a process it started that
+`stop.ps1` could not stop.
+
 **What happens to the record** depends on what the evidence proves:
 
 - **mismatch** — the PID is worn by a *different* executable. Proved not ours:
@@ -380,6 +389,138 @@ with no record keeps every label, help line and presentation key in it.
 - **1** — something unexpected: the engine exited with any other code, printed
   nothing, or printed something that is not a JSON document, or the script
   itself failed.
+
+## Machine interface
+
+The scripts are also driven by a program -- a launcher that runs them with no
+window and standard input from the null device, and acts on their exit codes
+and on one JSON document each prints. **A launcher owns no process logic: it
+never starts, stops or signals a LocalCanvas process itself.** Everything it
+needs is here, with the ownership rules above unchanged -- PID, start time and
+image path; stop by exact PID; an external or reused ComfyUI is never stopped;
+an `unproven` record is kept; never by name, never by port.
+
+### `-Component`
+
+| Script | `-Component` | Does |
+|---|---|---|
+| `start.ps1` | `All` (default) | Everything in "Two modes", exactly as without the switch. |
+| `start.ps1` | `Comfy` | The configuration and the ComfyUI step only: external verify, or managed reuse / launch with its ownership record. No workflow check, no gateway. |
+| `start.ps1` | `Gateway` | The configuration and the gateway step only. ComfyUI is neither probed nor required, its record is not read, and no workflow check runs. |
+| `stop.ps1` | `All` (default) | Both roles, exactly as without the switch. |
+| `stop.ps1` | `Gateway` | The gateway role only. The ComfyUI record is neither read nor touched. |
+
+`-SyncWorkflows` and `-SkipWorkflowCheck` stay valid with `All` and are refused
+with `Comfy` or `Gateway` -- exit **2**, as two contradictory switches are.
+
+So the launcher's flows are: daily start `start.ps1 -Component Comfy` →
+`sync-workflows.ps1 -DryRun -NoConvert` (the cheap check) → a sync only if the
+user agrees → `start.ps1 -Component Gateway`; *restart the gateway* is
+`stop.ps1 -Component Gateway` then `start.ps1 -Component Gateway` (the gateway
+reads the catalogue once, at start); exit is `stop.ps1`.
+
+### Gateway instance identity
+
+Every gateway `start.ps1` launches is given a fresh **instance id** -- 128 bits
+from the operating system's CSPRNG, written as 32 lowercase hex digits -- as
+`--instance-id <id>`, and echoes it as `instance_id` in `GET /api/v1/info`
+(`docs/api.md`). The gateway's ownership record carries it, with the endpoint
+the gateway was told to publish: `instance_id`, `published_endpoint`, `is_lan`
+and `local_only_reason`, added after the fields above. They are additive: a
+record written before they existed still loads, and still proves ownership for
+a stop.
+
+### Readiness is identity-verified
+
+"Something answers `/api/v1/info` as LocalCanvas" says a LocalCanvas gateway is
+on the port, not that it is the one this run started. So:
+
+- **Before launching**, the gateway port is checked on the probe host. If
+  anything answers HTTP there at all, or the port accepts a TCP connection,
+  nothing is launched: exit **5**, `Port <N> is already in use`, saying when the
+  answer is another LocalCanvas gateway's and naming the fix -- stop it
+  (`stop.ps1 -Component Gateway`, if LocalCanvas started it) or change
+  `gateway.port`. The process on the port is never looked up and never touched.
+- **Ready** means a 2xx `/api/v1/info` that identifies as LocalCanvas, carries
+  *this* instance id, and arrives while the process this run started has not
+  exited -- the exit is checked after each probe and before its answer is
+  trusted. A LocalCanvas answer with another id is not ready. On a timeout, or
+  when the child exits, the child is stopped by its PID and the exit is **5**,
+  as before. Its record is removed only when the child is proven gone (the stop
+  reports `exited` or `terminated`, or the record now names no live process).
+  A child that is still running keeps its record, because that record is the
+  only thing that lets `stop.ps1` stop it: the failure says so, the `-Json`
+  document's `gateway.pid` names it, and the fix is `pwsh .\scripts\stop.ps1 -Component Gateway`.
+- **The record is written right after the launch.** If it cannot be written,
+  the child just started is stopped by its PID and the exit is **5** -- a
+  gateway nothing could stop later is not left running. If that stop does not
+  take either, the failure names the PID that is still running with no record.
+- **Reuse.** A gateway whose record is `running` is reused only when its
+  `/api/v1/info` answers with the instance id its record carries. A record
+  with no instance id (written before them) or one that does not answer with
+  it is reported and not reused; nothing is stopped, the record is kept, and
+  the start goes on to the port check -- which refuses while that gateway
+  holds the port. A proven-ours gateway that is still running is never
+  replaced by a second launch, because that would overwrite the only record
+  that lets `stop.ps1` stop it.
+
+The check and the launch are two steps, so a port can still be taken between
+them; the identity check is what closes that window -- a gateway that loses
+the bind exits, and an answer from whatever won it does not carry our id.
+
+### `-Json`
+
+`start.ps1`, `stop.ps1`, `status.ps1` and `sync-workflows.ps1` take `-Json`.
+Standard output then carries **exactly one JSON document and nothing else**:
+one line, UTF-8 without a byte-order mark (non-ASCII characters are written as
+`\u` escapes, so the bytes are ASCII whatever the console's code page). Every
+human line -- the same lines as without the switch -- goes to standard error,
+where a caller can keep it as details. Exit codes are unchanged, and a
+document is printed on every exit path. Nobody is asked anything: a `-Json`
+start syncs only with `-SyncWorkflows`, and otherwise reports the change.
+
+Every document carries:
+
+| Key | Value |
+|---|---|
+| `result_version` | `1` |
+| `ok` | `true` when the script did its job |
+| `exit_code` | the process exit code |
+| `error` | `null`, or `{"what", "detail", "fix"}` -- the failure the script reported, in its own words; `detail` is one string, lines joined with `\n`, or `null` |
+
+and then, per script:
+
+- **`start.ps1`** -- `component`; `comfy`: `{status: ready|unreachable|failed|skipped,
+  url, ownership: owned|reused|external|none, pid}`; `gateway`: `{status:
+  ready|reused|failed|skipped, probe_url, instance_id, pid, published_endpoint,
+  is_lan, local_only_reason}`; `workflows` (`null` unless `-Component All`):
+  `{status: checked|failed|skipped|not_configured|not_reached}` and, for a check
+  that ran or failed, its fields -- `ok`, `new`, `changed`, `retry`, `removed`,
+  `unchanged`, `attention`, `total`, `changes`, `elapsed_ms`, `what`, `detail`,
+  `fix` -- and `sync: {answer: yes|no|unasked|not_needed, exit_code,
+  definitions_written}`. `ok` is `exit_code == 0`.
+- **`stop.ps1`** -- `component`; `roles.gateway` and `roles.comfy`, each
+  `{state_before, action, result, pid}`: `state_before` is the
+  `Resolve-LcOwnedProcess` state (`none`, `stale`, `unreadable`, `mismatch`,
+  `unproven`, `running`); `action` is `none`, `record_removed`, `record_kept` or
+  `stop`, and `skipped` for a role this run does not handle; `result` is
+  `Stop-LcOwnedProcess`'s outcome (`exited`, `terminated`, `still-running`) for
+  a stop, else `null`.
+- **`status.ps1`** -- still strictly read-only, and the document creates
+  nothing: `config_ok`, `mode` (`managed`|`external`), `comfy: {url, healthy,
+  ownership}`, `gateway: {probe_url, reachable, identity: localcanvas|foreign|none,
+  instance_id, instance_matches_record, ownership, pid, published_endpoint}`.
+  `ownership` is the `Resolve-LcOwnedProcess` state; `instance_matches_record`
+  is `null` unless both the answer and the record carry an id;
+  `published_endpoint` is the record's when there is one.
+- **`sync-workflows.ps1`** -- compact, never the engine's whole report:
+  `dry_run`, `no_convert`, `counts` and `unconverted_editor` (the engine's),
+  `changes`, `attention`, `new`, `changed`, `retry`, `removed` -- computed by
+  the same code as `start.ps1`'s check, so the two never disagree --
+  `attention_items` (`{id, state, reason}`, the reason's first line, at most
+  50), `attention_items_total`, `definitions_written` and `summary` (the
+  engine's line). `ok` is `true` for exit 0 and for exit 3, where the sync ran
+  and some workflows need a look.
 
 ## Startup output
 

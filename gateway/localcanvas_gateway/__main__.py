@@ -1,9 +1,11 @@
 """``python -m localcanvas_gateway`` -- the gateway's command-line seam.
 
     python -m localcanvas_gateway --config <path> [--host H] [--port P]
-                                  [--endpoint URL] [--no-mdns] [--no-qr]
+                                  [--endpoint URL] [--instance-id ID]
+                                  [--no-mdns] [--no-qr]
     python -m localcanvas_gateway config --config <path>
     python -m localcanvas_gateway qr --config <path> [--endpoint URL]
+                                     [--png PATH] [--scale N]
 
 **This CLI is a seam another component depends on** (`scripts/*.ps1`), so
 ``--config``, ``--host`` and ``--port`` keep their meaning.  ``--host`` and
@@ -30,6 +32,14 @@ Windows machine usually has several Pythons and a version mismatch should be
 visible in the terminal rather than discovered later from an import error
 (`docs/runtime.md`).
 
+``--instance-id`` names *this process*, not this build: something watching the
+gateway from outside (a launcher or process monitor) needs to tell one running
+gateway apart from a different one that happens to be listening on the same
+port.  It is 32 lowercase hex characters, checked before anything else runs;
+left out, one is generated (`secrets.token_hex(16)`), so every gateway that
+ever serves has an id whether or not anyone asked for a particular one.  It is
+printed once at startup and carried in `GET /api/v1/info` (`docs/api.md`).
+
 Failures print as a ``[FAIL]`` block naming what was attempted and what
 happened.  A traceback is never the primary failure UX; the exit code carries
 the outcome:
@@ -43,6 +53,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
+import secrets
 import sys
 from typing import Any, Callable, Optional, Sequence, TextIO
 
@@ -50,7 +62,7 @@ from . import __version__
 from .api import API_VERSION, build_gateway, create_app, translation_summary
 from .config import ConfigError, RuntimeConfig, config_document, load_config
 from .discovery import Advertisement, advertise, lan_address
-from .pairing import pairing_payload, pairing_qr_for_stream
+from .pairing import pairing_payload, pairing_qr_for_stream, pairing_qr_png
 from .translation import Translator
 from .workflows import RegistryError
 
@@ -58,6 +70,32 @@ log = logging.getLogger(__name__)
 
 EXIT_OK = 0
 EXIT_CONFIG = 2
+
+#: What ``--instance-id`` accepts.  32 lowercase hex characters -- the same
+#: shape ``secrets.token_hex(16)`` produces, so a generated id and a supplied
+#: one are indistinguishable to anything reading `GET /api/v1/info`.
+_INSTANCE_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+
+
+def _instance_id_argument(value: str) -> str:
+    # argparse prepends "argument --instance-id: " to this message itself, so
+    # the flag's name is not repeated here -- naming it twice is what a
+    # person actually saw before this fix.
+    if not _INSTANCE_ID_PATTERN.fullmatch(value):
+        raise argparse.ArgumentTypeError(
+            "must be exactly 32 lowercase hex characters, got {!r}".format(value)
+        )
+    return value
+
+
+def _positive_int_argument(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,6 +122,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="the endpoint a phone should use; advertised and encoded in the QR",
     )
     parser.add_argument(
+        "--instance-id",
+        type=_instance_id_argument,
+        default=None,
+        metavar="ID",
+        help="this process's identity, 32 lowercase hex characters; generated when omitted",
+    )
+    parser.add_argument(
         "--no-mdns", action="store_true", help="do not advertise the gateway over mDNS"
     )
     parser.add_argument(
@@ -106,6 +151,19 @@ def build_qr_parser() -> argparse.ArgumentParser:
             "force the full-size ASCII rendering; without it the output stream's "
             "encoding decides whether half blocks can be drawn"
         ),
+    )
+    parser.add_argument(
+        "--png",
+        default=None,
+        metavar="PATH",
+        help="write the QR as a PNG to this path instead of drawing it in the terminal",
+    )
+    parser.add_argument(
+        "--scale",
+        type=_positive_int_argument,
+        default=None,
+        metavar="N",
+        help="pixels per PNG module (default: sized to roughly 300-400 px); needs --png",
     )
     return parser
 
@@ -200,6 +258,12 @@ def _serve_command(
     _print(out, "[INFO] Interpreter: {} (Python {})".format(sys.executable, _python_version()))
     _print(out, "[INFO] Gateway version: {} (API v{})".format(__version__, API_VERSION))
 
+    # Named once, here, so the id in the banner and the id `GET /api/v1/info`
+    # reports for the whole life of this process are the same value -- never
+    # regenerated on the way into `build_gateway` below.
+    instance_id = args.instance_id or secrets.token_hex(16)
+    _print(out, "[INFO] Instance: {}".format(instance_id))
+
     try:
         config = load_config(args.config)
     except ConfigError as exc:
@@ -208,7 +272,7 @@ def _serve_command(
     _print(out, "[ OK ] Configuration loaded: {}".format(config.source))
 
     try:
-        state = build_gateway(config, translator=translator)
+        state = build_gateway(config, translator=translator, instance_id=instance_id)
     except RegistryError as exc:
         _fail(
             err,
@@ -335,7 +399,14 @@ def _uvicorn_serve(app: Any, *, host: str, port: int) -> None:
 
 
 def _qr_command(argv: Sequence[str], out: TextIO, err: TextIO) -> int:
-    args = build_qr_parser().parse_args(argv)
+    parser = build_qr_parser()
+    args = parser.parse_args(argv)
+
+    if args.scale is not None and args.png is None:
+        # ``--scale`` is pixels *per PNG module*; without ``--png`` there is no
+        # PNG for it to size, so silently ignoring it would let a typo'd
+        # command look like it had done something.
+        parser.error("--scale requires --png")
 
     endpoint = args.endpoint
     if endpoint is None:
@@ -358,6 +429,18 @@ def _qr_command(argv: Sequence[str], out: TextIO, err: TextIO) -> int:
         return EXIT_CONFIG
 
     _print(out, pairing_payload(endpoint))
+
+    if args.png is not None:
+        # A file is written instead of drawn; the payload line above still
+        # says what it encodes, which is the only text output this branch
+        # owes anyone.
+        try:
+            pairing_qr_png(endpoint, args.png, scale=args.scale)
+        except OSError as exc:
+            _fail(err, "The QR image could not be written", str(exc))
+            return EXIT_CONFIG
+        return EXIT_OK
+
     # ``--wide`` is an instruction; without it the stream decides, so a
     # redirected run on a cp1251 machine prints a code instead of dying.
     _print(out, pairing_qr_for_stream(endpoint, out, wide=args.wide))

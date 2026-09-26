@@ -10,6 +10,7 @@ to have thought about.  ``GET /api/v1/info`` is the health page.
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Iterable, Optional
 
@@ -83,11 +84,17 @@ def build_gateway(
     registry: Optional[Registry] = None,
     media_store: Optional[MediaStore] = None,
     translator: Optional[Translator] = None,
+    instance_id: Optional[str] = None,
 ) -> GatewayState:
     """Load the registry and open the ComfyUI client for one configuration.
 
     A rejected workflow is logged and left out; one bad definition never stops
     the gateway from starting (`docs/workflow-schema.md`).
+
+    ``instance_id`` names *this* process (`--instance-id`, validated by the
+    CLI).  Left out -- which every caller but the CLI does -- a fresh one is
+    generated here, so every gateway this function ever builds has one, and
+    two built without an explicit id never collide on it.
     """
 
     loaded = registry if registry is not None else load_registry(config.workflows_registry)
@@ -148,6 +155,7 @@ def build_gateway(
         comfy=client,
         jobs=jobs_store,
         media=store,
+        instance_id=instance_id if instance_id is not None else secrets.token_hex(16),
         # The seam `workflows/binding.py` left for LCM-006, filled once, here.
         # Nothing else in the gateway decides what a media field binds to.
         media_resolver=ComfyInputResolver(store, client),

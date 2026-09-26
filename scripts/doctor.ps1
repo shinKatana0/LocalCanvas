@@ -251,7 +251,16 @@ function Get-AddressRouteLines {
         return @("This machine's route table could not be read, so the route to $Address is not known.")
     }
     try {
-        $routes = @(Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop)
+        $routes = @(Invoke-LcBoundedSystemQuery -What 'a route table query' -Query {
+                Get-NetRoute -AddressFamily IPv4 -ErrorAction Stop | ForEach-Object {
+                    [pscustomobject]@{
+                        DestinationPrefix = [string]$_.DestinationPrefix
+                        InterfaceAlias    = [string]$_.InterfaceAlias
+                        ifIndex           = [int]$_.ifIndex
+                        RouteMetric       = [int]$_.RouteMetric
+                    }
+                }
+            })
     } catch {
         return @("This machine's route table could not be read: $("$($_.Exception.Message)".Trim())")
     }
@@ -279,7 +288,11 @@ function Get-AddressRouteLines {
     $holder = @()
     try {
         if (Get-Command Get-NetIPAddress -ErrorAction SilentlyContinue) {
-            $holder = @(Get-NetIPAddress -IPAddress $Address -AddressFamily IPv4 -ErrorAction Stop)
+            $holder = @(Invoke-LcBoundedSystemQuery -What 'a network address query' -Arguments @{ Address = $Address } -Query {
+                    Get-NetIPAddress -IPAddress $Address -AddressFamily IPv4 -ErrorAction Stop | ForEach-Object {
+                        [pscustomobject]@{ InterfaceAlias = [string]$_.InterfaceAlias }
+                    }
+                })
         }
     } catch {
         $holder = @()
@@ -388,7 +401,15 @@ function Get-GatewayPortRules {
         # InstanceID. The alternative -- piping each rule to
         # Get-NetFirewallPortFilter -- is a CIM round trip per rule and takes
         # about half a minute on an ordinary Windows install.
-        $filters = @(Get-NetFirewallPortFilter -ErrorAction Stop)
+        $filters = @(Invoke-LcBoundedSystemQuery -What 'a firewall query' -Query {
+                Get-NetFirewallPortFilter -ErrorAction Stop | ForEach-Object {
+                    [pscustomobject]@{
+                        Protocol   = [string]$_.Protocol
+                        LocalPort  = @($_.LocalPort | ForEach-Object { [string]$_ })
+                        InstanceID = [string]$_.InstanceID
+                    }
+                }
+            })
     } catch {
         $message = "$($_.Exception.Message)".Trim()
         # Decided by the error's category, never by its text: the message is
@@ -417,7 +438,18 @@ function Get-GatewayPortRules {
     $matched = @()
     if ($wanted.Count -gt 0) {
         try {
-            foreach ($rule in @(Get-NetFirewallRule -Direction Inbound -ErrorAction Stop)) {
+            $inbound = @(Invoke-LcBoundedSystemQuery -What 'a firewall query' -Query {
+                    Get-NetFirewallRule -Direction Inbound -ErrorAction Stop | ForEach-Object {
+                        [pscustomobject]@{
+                            InstanceID  = [string]$_.InstanceID
+                            Enabled     = [string]$_.Enabled
+                            DisplayName = [string]$_.DisplayName
+                            Action      = [string]$_.Action
+                            Profile     = [string]$_.Profile
+                        }
+                    }
+                })
+            foreach ($rule in $inbound) {
                 if (-not $wanted.ContainsKey("$($rule.InstanceID)")) { continue }
                 if ("$($rule.Enabled)" -ne 'True') { continue }
                 $matched += [pscustomobject]@{
@@ -842,8 +874,10 @@ try {
     $categories = @()
     try {
         if (Get-Command Get-NetConnectionProfile -ErrorAction SilentlyContinue) {
-            $categories = @(Get-NetConnectionProfile -ErrorAction Stop |
-                ForEach-Object { "$($_.Name): $($_.NetworkCategory)" })
+            $categories = @(Invoke-LcBoundedSystemQuery -What 'a network category query' -Query {
+                    Get-NetConnectionProfile -ErrorAction Stop |
+                        ForEach-Object { "$($_.Name): $($_.NetworkCategory)" }
+                })
         }
     } catch {
         $categories = @()
