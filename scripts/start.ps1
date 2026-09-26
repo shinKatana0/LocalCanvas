@@ -263,7 +263,9 @@ function Get-LcRecordFailure {
         just launched, as the things a failure message needs: whether the
         cause was the identity read (then no record was written, and a record
         already there is not this run's to remove), whether it was the bound,
-        and the one fix that fits the cause.
+        and the one fix that fits the cause -- as Fix, and as AfterEnding,
+        the same advice for a message that has already told the user to end
+        the process themselves first.
     #>
     param(
         [Parameter(Mandatory)][System.Exception]$Exception,
@@ -272,19 +274,26 @@ function Get-LcRecordFailure {
     $identityUnreadable = [bool]($Exception.Data -and $Exception.Data.Contains('LcIdentityUnreadable'))
     $timedOut = ($Exception -is [System.TimeoutException])
     if ($identityUnreadable -and $timedOut) {
-        $fix = ('Start again. If Windows keeps not answering process queries, its management ' +
+        $advice = ('If Windows keeps not answering process queries, its management ' +
             'service (WMI) is stuck; restarting Windows usually clears it.')
+        $fix = "Start again. $advice"
+        $afterEnding = "then start again. $advice"
     } elseif ($identityUnreadable) {
-        $fix = ('Start again. If it keeps failing, Windows could not answer a process query (WMI): ' +
+        $advice = ('If it keeps failing, Windows could not answer a process query (WMI): ' +
             'that service is not working, and restarting Windows usually clears it.')
+        $fix = "Start again. $advice"
+        $afterEnding = "then start again. $advice"
     } else {
-        $fix = "Make sure LocalCanvas can write to $(Split-Path -Parent $RecordPath), then start again."
+        $directory = Split-Path -Parent $RecordPath
+        $fix = "Make sure LocalCanvas can write to $directory, then start again."
+        $afterEnding = "then make sure LocalCanvas can write to $directory and start again."
     }
     return [pscustomobject]@{
         Message            = "$($Exception.Message)".Trim()
         IdentityUnreadable = $identityUnreadable
         TimedOut           = $timedOut
         Fix                = $fix
+        AfterEnding        = $afterEnding
     }
 }
 
@@ -558,7 +567,7 @@ try {
                         Write-LcFailure -What "ComfyUI's ownership record could not be written, and ComfyUI (PID $launchedPid) could not be stopped" `
                             -Detail $detail `
                             -Fix ("End PID $launchedPid yourself -- Task Manager, Details tab, by that PID and no other -- " +
-                                "then start again. $($comfySaveFailure.Fix)")
+                                $comfySaveFailure.AfterEnding)
                     }
                     Complete-Run $EXIT_COMFY
                 }
@@ -1018,7 +1027,7 @@ try {
                 Write-LcFailure -What "The gateway's ownership record could not be written, and the gateway (PID $launchedPid) could not be stopped" `
                     -Detail $detail `
                     -Fix ("End PID $launchedPid yourself -- Task Manager, Details tab, by that PID and no other -- " +
-                        "then start again. $($recordSaveFailure.Fix)")
+                        $recordSaveFailure.AfterEnding)
             }
             Complete-Run $EXIT_GATEWAY
         }

@@ -26417,6 +26417,72 @@ class SystemQueryBoundTests(MachineInterfaceTestCase):
         self.assertEqual(1, len(launched), output)
         self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20), output)
 
+    def test_a_gateway_record_already_there_is_kept_when_start_refuses_to_record(self):
+        """The gateway twin of the test above.
+
+        An unproven gateway record for a live process the harness owns, and a
+        launch whose identity Windows does not answer: the gateway this run
+        launched is stopped, exit 5 -- and the record naming the other process
+        stays byte for byte, with that process still running.
+        """
+        other = self.start_idle_process()
+        self.write_config()
+        self.write_pid_file("gateway", self.unprovable_record(other.pid, role="gateway"))
+        before = self.pid_file_bytes("gateway")
+        gateway_before = set(self.launched_gateway_pids())
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        result = self.run_script("start.ps1", "-Component", "Gateway", script_dir=stalled, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertEqual(before, self.pid_file_bytes("gateway"),
+                         "the refusal changed a record that describes another process:\n" + output)
+        self.assertIsNone(other.poll(), "start.ps1 stopped a process it could not prove")
+        launched = [pid for pid in self.launched_gateway_pids() if pid not in gateway_before]
+        self.assertEqual(1, len(launched), output)
+        self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                        "the gateway this run launched is still running with no record")
+
+    def test_a_comfy_launch_that_cannot_be_undone_says_so_and_records_nothing(self):
+        """The one ending with no safe cleanup: the child will not stop.
+
+        The copy under test cannot stop anything (Stop-LcOwnedProcess returns
+        'still-running' and the copy is asserted to carry no Stop-Process), so
+        the ComfyUI it launches outlives the refusal. start.ps1 still exits 3,
+        writes no record it cannot prove, names the PID and tells the user to
+        end it -- once, without repeating itself. The teardown ends the child
+        by the PID its own marker names.
+        """
+        self.write_config()
+        copied = self.copy_scripts_with_stopping_disabled()
+        library = copied / "lib" / "Common.ps1"
+        self.assertIn(Path(self.workspace).resolve(), library.resolve().parents)
+        library.write_text(library.read_text(encoding="utf-8-sig") + "\n" + STALLED_CIM, encoding="utf-8")
+
+        result, document = self.run_json("start.ps1", script_dir=copied, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(3, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        launched = self.comfy_launched_pids()
+        self.assertEqual(1, len(launched), output)
+        self.addCleanup(self.force_terminate, launched[0])
+        self.assertTrue(self.alive(launched[0]), output)
+
+        error = document["error"]
+        self.assertEqual(
+            "ComfyUI's ownership record could not be written, and ComfyUI (PID {}) could not be "
+            "stopped".format(launched[0]), error["what"], output)
+        self.assertIn("PID {} is STILL RUNNING".format(launched[0]), error["detail"])
+        self.assertIn("No gateway was started.", error["detail"])
+        self.assertIn("End PID {} yourself".format(launched[0]), error["fix"])
+        self.assertIn("its management service (WMI) is stuck", error["fix"])
+        self.assertNotIn("Start again", error["fix"], "the fix repeats itself: " + error["fix"])
+        self.assertEqual(1, error["fix"].lower().count("start again"), error["fix"])
+        self.assertEqual(launched[0], document["comfy"]["pid"], output)
+        self.assertIsNone(self.read_pid_file("comfy"), output)
+        self.assertIsNone(self.read_pid_file("gateway"), output)
+        self.assertEqual([], self.launched_gateway_pids(), output)
+
     def test_start_undoes_a_gateway_launch_windows_will_not_identify(self):
         """The same rule on the gateway half: exit 5, and a fix that fits the cause.
 
