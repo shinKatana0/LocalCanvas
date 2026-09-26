@@ -31,6 +31,9 @@ public sealed class GatewayQrCommand(string pwsh, string root, IProcessRunner pr
         return $"& {PowerShellText.Quote(python)} -m localcanvas_gateway qr --endpoint {PowerShellText.Quote(endpoint)} --png {PowerShellText.Quote(pngPath)}; exit $LASTEXITCODE";
     }
 
+    private const string FilePrefix = "pairing-qr-";
+    private const string FileSuffix = ".png";
+
     public async Task<string?> WritePngAsync(string endpoint, CancellationToken cancellationToken = default)
     {
         string path;
@@ -38,11 +41,20 @@ public sealed class GatewayQrCommand(string pwsh, string root, IProcessRunner pr
         {
             var directory = LauncherLog.RuntimeDirectory(root);
             Directory.CreateDirectory(directory);
-            path = Path.Combine(directory, "pairing-qr.png");
-            // A stale image from a previous endpoint must never be shown as
-            // this one's: gone before the command runs, not merely
-            // overwritten on success.
-            File.Delete(path);
+            // One file per request, never a shared name: two overlapping
+            // requests (an endpoint changed while the previous one's process
+            // was still running -- a process this launcher never ends) must
+            // never be able to write over each other's result. Whatever
+            // earlier requests left behind is swept first, so they do not
+            // pile up; a request whose own process is still running when the
+            // next one starts may still recreate its own (now-orphaned) file
+            // afterwards, which is the same best-effort cleanup the rest of
+            // the launcher accepts for a process it does not end.
+            foreach (var stale in Directory.EnumerateFiles(directory, FilePrefix + "*" + FileSuffix))
+            {
+                TryDelete(stale);
+            }
+            path = Path.Combine(directory, FilePrefix + Guid.NewGuid().ToString("N") + FileSuffix);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -61,5 +73,16 @@ public sealed class GatewayQrCommand(string pwsh, string root, IProcessRunner pr
             return null;
         }
         return path;
+    }
+
+    private static void TryDelete(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
     }
 }

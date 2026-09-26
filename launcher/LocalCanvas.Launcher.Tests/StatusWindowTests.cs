@@ -9,11 +9,31 @@ internal sealed class FakeQrCommand : IQrCommand
     public Func<string, string?>? Result { get; set; }
     public readonly List<string> Requested = [];
 
-    public Task<string?> WritePngAsync(string endpoint, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// A request for this endpoint waits here before answering -- and
+    /// deliberately does not observe <paramref name="cancellationToken"/>
+    /// while doing so: the real seam's own process is never ended either, so
+    /// a "cancelled" (superseded) request can still complete normally, late.
+    /// </summary>
+    public readonly Dictionary<string, TaskCompletionSource> Holds = new();
+
+    public async Task<string?> WritePngAsync(string endpoint, CancellationToken cancellationToken = default)
     {
         Requested.Add(endpoint);
-        return Task.FromResult(Result?.Invoke(endpoint));
+        if (Holds.TryGetValue(endpoint, out var hold))
+        {
+            await hold.Task.ConfigureAwait(false);
+        }
+        return Result?.Invoke(endpoint);
     }
+}
+
+/// <summary>A fake <see cref="ITextClipboard"/>: records exactly what was set, nothing touches the real clipboard.</summary>
+internal sealed class FakeClipboard : ITextClipboard
+{
+    public readonly List<string> Texts = [];
+
+    public void SetText(string text) => Texts.Add(text);
 }
 
 public sealed class StatusWindowTests : IDisposable
@@ -21,6 +41,7 @@ public sealed class StatusWindowTests : IDisposable
     private const string Root = @"X:\LocalCanvas";
     private readonly List<string> _restarts = [];
     private readonly FakeQrCommand _qr = new();
+    private readonly FakeClipboard _clipboard = new();
     private StatusWindow? _window;
 
     private static TrayViewModel Model(
@@ -40,7 +61,7 @@ public sealed class StatusWindowTests : IDisposable
 
     private StatusWindow NewWindow()
     {
-        _window = new StatusWindow(() => _restarts.Add("restart"), Root, _qr);
+        _window = new StatusWindow(() => _restarts.Add("restart"), Root, _qr, _clipboard);
         // A Control's own Visible getter follows its parent chain: an
         // un-shown Form reads every child as invisible regardless of what
         // was set on the child. Shown off-screen (the same trick
@@ -161,6 +182,94 @@ public sealed class StatusWindowTests : IDisposable
     }
 
     [Fact]
+    public void The_Endpoint_label_follows_a_changed_endpoint()
+    {
+        _qr.Result = _ => null;
+        var window = NewWindow();
+
+        window.Apply(Model(publishedEndpoint: "http://192.0.2.10:7801"));
+        Assert.Equal("Endpoint: http://192.0.2.10:7801", TextOf(window, "Endpoint"));
+
+        window.Apply(Model(publishedEndpoint: "http://192.0.2.11:7801"));
+        Assert.Equal("Endpoint: http://192.0.2.11:7801", TextOf(window, "Endpoint"));
+
+        window.Apply(Model(publishedEndpoint: null));
+        Assert.Equal("Endpoint: not published yet", TextOf(window, "Endpoint"));
+    }
+
+    [Fact]
+    public void Copy_address_copies_exactly_the_shown_endpoint()
+    {
+        _qr.Result = _ => null;
+        var window = NewWindow();
+        const string Endpoint = "http://192.0.2.10:7801";
+        window.Apply(Model(publishedEndpoint: Endpoint));
+
+        ((Button)Find(window, "Copy address")).PerformClick();
+
+        var copied = Assert.Single(_clipboard.Texts);
+        Assert.Equal(Endpoint, copied);
+        Assert.Equal("Endpoint: " + Endpoint, TextOf(window, "Endpoint"));
+    }
+
+    [Fact]
+    public void Copy_address_follows_a_changed_endpoint_too()
+    {
+        _qr.Result = _ => null;
+        var window = NewWindow();
+        window.Apply(Model(publishedEndpoint: "http://192.0.2.10:7801"));
+        window.Apply(Model(publishedEndpoint: "http://192.0.2.11:7801"));
+
+        ((Button)Find(window, "Copy address")).PerformClick();
+
+        Assert.Equal(["http://192.0.2.11:7801"], _clipboard.Texts);
+    }
+
+    [Fact]
+    public void A_superseded_requests_late_result_never_overwrites_the_newer_one()
+    {
+        const string EndpointA = "http://192.0.2.10:7801";
+        const string EndpointB = "http://192.0.2.11:7801";
+        var pngPath = Path.Combine(Path.GetTempPath(), $"lc-status-window-test-{Guid.NewGuid():N}.png");
+        File.WriteAllBytes(pngPath, OnePixelPng());
+        try
+        {
+            var holdA = new TaskCompletionSource();
+            _qr.Holds[EndpointA] = holdA;
+            // A succeeds (late) with a real image; B fails (fast) with no
+            // image. If A's late, superseded result were ever applied, the
+            // QR image would wrongly appear after B already settled on its
+            // fallback text.
+            _qr.Result = endpoint => endpoint == EndpointA ? pngPath : null;
+
+            var window = NewWindow();
+            window.Apply(Model(publishedEndpoint: EndpointA));
+            Assert.Equal([EndpointA], _qr.Requested);
+
+            window.Apply(Model(publishedEndpoint: EndpointB));
+            Assert.Equal([EndpointA, EndpointB], _qr.Requested);
+            Assert.False(IsQrShown(window), "B's (fast, failing) result should already be showing the fallback");
+            Assert.Contains("No pairing QR available", TextOf(window, "QR fallback"), StringComparison.Ordinal);
+
+            // A's held request now completes, out of order, after B already
+            // settled. Its continuation resumes on a thread-pool thread (the
+            // same as the real seam resuming after real process I/O), so it
+            // is marshalled through BeginInvoke -- pumped here the way the
+            // launcher's own message loop would in the real app.
+            holdA.SetResult();
+            PumpMessages();
+
+            Assert.False(IsQrShown(window), "A's late, superseded result must never overwrite B's");
+            Assert.Contains("No pairing QR available", TextOf(window, "QR fallback"), StringComparison.Ordinal);
+            Assert.Equal("Endpoint: " + EndpointB, TextOf(window, "Endpoint"));
+        }
+        finally
+        {
+            File.Delete(pngPath);
+        }
+    }
+
+    [Fact]
     public void Close_hides_the_window_instead_of_disposing_it()
     {
         var window = NewWindow();
@@ -176,6 +285,23 @@ public sealed class StatusWindowTests : IDisposable
         using var stream = new MemoryStream();
         bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
         return stream.ToArray();
+    }
+
+    /// <summary>
+    /// Runs the window's own message loop briefly, the way the real
+    /// launcher's <c>Application.Run</c> would: a <c>BeginInvoke</c>d
+    /// continuation (a real process's exit resumes on a thread-pool thread,
+    /// same as a held fake completing here) only executes once something
+    /// pumps messages for it.
+    /// </summary>
+    private static void PumpMessages(int milliseconds = 500)
+    {
+        var until = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        while (DateTime.UtcNow < until)
+        {
+            Application.DoEvents();
+            System.Threading.Thread.Sleep(10);
+        }
     }
 
     private static bool IsQrShown(Control root) => Find(root, "Pairing QR code") is PictureBox { Visible: true, Image: not null };

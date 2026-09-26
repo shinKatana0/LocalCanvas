@@ -138,6 +138,10 @@ public sealed class StartupTests
         Assert.Single(harness.Runtime.Calls, call => call.Names("start.ps1", "-Component", "Gateway"));
         Assert.Equal("Workflows: 4 (check did not complete)", harness.Model.WorkflowsLine);
         Assert.Contains("The sources configuration is invalid", harness.Model.Problem);
+        // Attention reached through a problem, not a count: the tooltip must
+        // still say something happened, not read as a plain "Ready" beside
+        // the Attention triangle icon.
+        Assert.Equal("LocalCanvas — Ready (workflow check did not complete)", harness.Model.Tooltip);
     }
 
     [Fact]

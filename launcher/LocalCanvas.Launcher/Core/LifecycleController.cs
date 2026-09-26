@@ -1497,7 +1497,7 @@ public sealed class LifecycleController : IAsyncDisposable
                          && _state is LauncherState.Ready or LauncherState.Attention or LauncherState.GatewayDown;
         return new TrayViewModel(
             State: shown,
-            Tooltip: TrayViewModel.TooltipFor(shown, _attentionCount),
+            Tooltip: TrayViewModel.TooltipFor(shown, _attentionCount, _workflowProblem is not null),
             GatewayLine: "Gateway: " + GatewayStatus(shown),
             ComfyLine: "ComfyUI: " + ComfyStatus(),
             WorkflowsLine: "Workflows: " + WorkflowsStatus(),

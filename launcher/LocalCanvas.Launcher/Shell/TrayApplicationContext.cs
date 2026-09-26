@@ -16,6 +16,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
     private readonly TrayIcons _icons;
     private readonly NotifyIcon _icon;
     private readonly TrayMenu _menu;
+    private readonly TrayPresenter _presenter;
     private readonly string _root;
     private readonly string _pwsh;
     private readonly IProcessRunner _processes;
@@ -53,6 +54,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
             Visible = true,
         };
         _icon.DoubleClick += (_, _) => OpenStatus();
+        _presenter = new TrayPresenter(_icon, _icons, _menu, () => _statusWindow);
 
         prompts.Attach(_window, ShowBalloon);
         controller.ViewModelChanged += model => Post(() => Apply(model));
@@ -74,10 +76,7 @@ internal sealed class TrayApplicationContext : ApplicationContext
         {
             return;
         }
-        _icon.Text = Clip(model.Tooltip);
-        _icon.Icon = _icons.IconFor(model.State);
-        _menu.Apply(model);
-        _statusWindow?.Apply(model);
+        _presenter.Apply(model);
     }
 
     private void OpenStatus()

@@ -13,6 +13,7 @@ namespace LocalCanvas.Launcher.Shell;
 internal sealed class StatusWindow : Form
 {
     private readonly IQrCommand _qr;
+    private readonly ITextClipboard _clipboard;
     private readonly string _root;
 
     private readonly Label _gatewayHeader = NewHeader("Gateway");
@@ -49,11 +50,12 @@ internal sealed class StatusWindow : Form
     {
     }
 
-    /// <summary>For tests: a fake <see cref="IQrCommand"/> instead of a real PowerShell call.</summary>
-    internal StatusWindow(Action restart, string root, IQrCommand qr)
+    /// <summary>For tests: a fake <see cref="IQrCommand"/> instead of a real PowerShell call, and optionally a fake clipboard.</summary>
+    internal StatusWindow(Action restart, string root, IQrCommand qr, ITextClipboard? clipboard = null)
     {
         _root = root;
         _qr = qr;
+        _clipboard = clipboard ?? new SystemClipboard();
 
         Text = "LocalCanvas";
         StartPosition = FormStartPosition.CenterScreen;
@@ -237,7 +239,7 @@ internal sealed class StatusWindow : Form
         {
             return;
         }
-        Clipboard.SetText(text);
+        _clipboard.SetText(text);
     }
 
     protected override void OnFormClosing(FormClosingEventArgs e)
