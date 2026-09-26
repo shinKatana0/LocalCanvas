@@ -20,8 +20,8 @@ public sealed class StatusWindowLayoutTests : IDisposable
         public Task<string?> WritePngAsync(string endpoint, CancellationToken cancellationToken = default) => Task.FromResult<string?>(null);
     }
 
-    private static TrayViewModel Model() => new(
-        LauncherState.Ready, TrayViewModel.TooltipFor(LauncherState.Ready), "Gateway: Ready", "ComfyUI: Ready", "Workflows: 1",
+    private static TrayViewModel Model(LauncherState state = LauncherState.Ready, string gatewayLine = "Gateway: Ready") => new(
+        state, TrayViewModel.TooltipFor(state), gatewayLine, "ComfyUI: Ready", "Workflows: 1",
         Busy: false, CanRestartGateway: true, CanSyncWorkflows: true, CanOpenStatus: true, CanExit: true,
         Problem: null, PublishedEndpoint: "http://192.0.2.10:7801", InstanceId: null, ComfyUrl: null, LogPath: @"X:\LocalCanvas\.runtime\launcher.log");
 
@@ -49,17 +49,40 @@ public sealed class StatusWindowLayoutTests : IDisposable
         var before = VisibleOrder(window);
         Assert.Contains("Copy address", before);
         Assert.Contains("Gateway", before);
+        AssertBottomRowIsPinned(window);
 
         // The same effect UI Automation's InvokePattern has on z-order when
         // it presses a button (SetFocus and raising the HWND): BringToFront
         // moves the control to the front of its parent's z-order and child
-        // list -- exactly the mechanism the reviewer diagnosed. This is a
+        // list -- exactly the mechanism described above. This is a
         // deterministic, non-UIA way to exercise the identical WinForms
         // behaviour.
         Find(window, "Copy address").BringToFront();
 
         var after = VisibleOrder(window);
         Assert.Equal(before, after);
+        AssertBottomRowIsPinned(window);
+    }
+
+    /// <summary>
+    /// The bottom row (Open logs folder, then Close) each in their own fixed
+    /// cell: without one, a control added to a TableLayoutPanel falls back to
+    /// the next free cell in Controls-collection order, which visibly
+    /// misplaces it (observed: Open logs folder jumping to the panel's left
+    /// edge while Close stays put) without any control ever changing parent
+    /// or z-order -- a distinct failure mode from the main panel's, and one
+    /// BringToFront alone does not exercise.
+    /// </summary>
+    private static void AssertBottomRowIsPinned(Form window)
+    {
+        var openLogs = Find(window, "Open logs folder");
+        var close = Find(window, "Close");
+        Assert.True(openLogs.Left < close.Left, $"Open logs folder ({openLogs.Left}) should sit left of Close ({close.Left})");
+        // Right-aligned as a pair: both sit in the right portion of the
+        // button row's own parent, not pinned to its left edge.
+        var panelWidth = close.Parent!.ClientSize.Width;
+        Assert.True(openLogs.Left > panelWidth / 2, $"Open logs folder (x={openLogs.Left}) should be right-aligned, not at the panel's left edge (width {panelWidth})");
+        Assert.True(close.Right <= panelWidth, $"Close (right={close.Right}) should not overflow its panel (width {panelWidth})");
     }
 
     [Fact]
@@ -78,6 +101,84 @@ public sealed class StatusWindowLayoutTests : IDisposable
         button.PerformClick();
 
         Assert.Equal(["http://192.0.2.10:7801"], clipboard.Texts);
+    }
+
+    [Fact]
+    public void Restart_Gateway_is_visible_without_scrolling_and_comes_before_the_bottom_row_in_tab_order()
+    {
+        var window = NewWindow();
+        window.Apply(Model(LauncherState.GatewayDown, "Gateway: DOWN"));
+
+        var restart = Find(window, "Restart Gateway");
+        Assert.True(restart.Visible);
+        // Within its own scrollable panel's visible viewport (scroll
+        // position starts at the top): reaching it needs neither a scroll
+        // nor tabbing past the workflow counts and the bottom row.
+        var viewportHeight = restart.Parent!.ClientSize.Height;
+        Assert.True(restart.Bottom <= viewportHeight,
+            $"Restart Gateway (bottom={restart.Bottom}) should be visible without scrolling in its panel's viewport (height {viewportHeight})");
+
+        // In the Gateway section itself, not after it: this is what actually
+        // distinguishes "next to Status: DOWN" from merely fitting on screen
+        // in a short test window -- a real running window's QR image and
+        // workflow content push a later row well past the fold even though a
+        // sparse test fixture's would not. (The QR PictureBox itself is
+        // skipped here: it stays Visible = false with no QR command wired
+        // up, and an invisible control's own Top is not meaningfully laid
+        // out -- the always-visible section labels around it are enough.)
+        var comfyTop = Find(window, "ComfyUI").Top;
+        var workflowsTop = Find(window, "Workflows").Top;
+        Assert.True(restart.Top < comfyTop, $"Restart Gateway (top={restart.Top}) should sit before the ComfyUI section (top={comfyTop})");
+        Assert.True(restart.Top < workflowsTop, $"Restart Gateway (top={restart.Top}) should sit before the Workflows section (top={workflowsTop})");
+
+        var order = TabOrder(window);
+        var restartIndex = order.IndexOf("Restart Gateway");
+        var copyAddressIndex = order.IndexOf("Copy address");
+        var openLogsIndex = order.IndexOf("Open logs folder");
+        var closeIndex = order.IndexOf("Close");
+        Assert.True(restartIndex >= 0, "Restart Gateway should be reachable by Tab while the Gateway is down");
+        // Before Copy address (still in the Gateway section) as well as
+        // before the bottom row -- the latter alone is true for any row in
+        // the main panel, since the bottom row is a separate, later
+        // container regardless of where within the main panel a row sits.
+        Assert.True(restartIndex < copyAddressIndex, $"Restart Gateway (tab #{restartIndex}) should precede Copy address (#{copyAddressIndex})");
+        Assert.True(restartIndex < openLogsIndex, $"Restart Gateway (tab #{restartIndex}) should precede Open logs folder (#{openLogsIndex})");
+        Assert.True(restartIndex < closeIndex, $"Restart Gateway (tab #{restartIndex}) should precede Close (#{closeIndex})");
+    }
+
+    [Fact]
+    public void Restart_Gateway_is_hidden_and_out_of_tab_order_while_not_down()
+    {
+        var window = NewWindow();
+        window.Apply(Model(LauncherState.Ready));
+
+        Assert.False(Find(window, "Restart Gateway").Visible);
+        Assert.DoesNotContain("Restart Gateway", TabOrder(window));
+    }
+
+    /// <summary>
+    /// The effective Tab order a real user would reach (Control.GetNextControl
+    /// -- null past the last control, so this always terminates -- filtered to
+    /// Visible and TabStop the same way keyboard navigation skips a hidden or
+    /// disabled control that GetNextControl's own raw traversal does not).
+    /// </summary>
+    private static List<string> TabOrder(Form window)
+    {
+        var order = new List<string>();
+        Control? current = null;
+        for (var i = 0; i < 50; i++)
+        {
+            current = window.GetNextControl(current, true);
+            if (current is null)
+            {
+                break;
+            }
+            if (current.TabStop && current.Visible && !string.IsNullOrEmpty(current.AccessibleName))
+            {
+                order.Add(current.AccessibleName!);
+            }
+        }
+        return order;
     }
 
     /// <summary>Every named control, top to bottom by its actual post-layout position.</summary>

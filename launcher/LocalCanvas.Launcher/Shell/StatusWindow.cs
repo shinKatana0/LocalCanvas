@@ -78,13 +78,18 @@ internal sealed class StatusWindow : Form
         // consult that order at all, so the same z-order change has no
         // visible effect. See StatusWindowLayoutTests for a reproduction and
         // the regression test.
+        // Restart Gateway sits right in the Gateway section, next to
+        // "Status: DOWN" -- it is the status window's recovery action, so it
+        // must be visible without scrolling or tabbing past everything else
+        // when the Gateway is down (it is hidden the rest of the time; see
+        // Apply). A row further down would put it below the fold under the
+        // window's own fixed size, the defect reported against round three.
         var rows = new Control[]
         {
-            _gatewayHeader, _gatewayStatus, _endpoint, _copyAddress, _qrImage, _qrFallback,
+            _gatewayHeader, _gatewayStatus, _restart, _endpoint, _copyAddress, _qrImage, _qrFallback,
             _comfyHeader, _comfyStatus,
             _workflowsHeader, _workflowsReady, _workflowsAttention,
             _problem,
-            _restart,
             _log,
         };
         var lines = new TableLayoutPanel
