@@ -14,8 +14,8 @@ public sealed class TrayPresenterTests : IDisposable
     private readonly TrayIcons _icons = new(new Size(16, 16));
     private readonly TrayMenu _menu = new(() => { }, () => { }, () => { }, () => { });
 
-    private static TrayViewModel Model(string workflowsLine, LauncherState state = LauncherState.Ready) => new(
-        state, TrayViewModel.TooltipFor(state), "Gateway: Ready", "ComfyUI: Ready", workflowsLine,
+    private static TrayViewModel Model(string workflowsLine, LauncherState state = LauncherState.Ready, string gatewayLine = "Gateway: Ready") => new(
+        state, TrayViewModel.TooltipFor(state), gatewayLine, "ComfyUI: Ready", workflowsLine,
         Busy: false, CanRestartGateway: true, CanSyncWorkflows: true, CanOpenStatus: true, CanExit: true,
         Problem: null, PublishedEndpoint: null, InstanceId: null, ComfyUrl: null, LogPath: "log");
 
@@ -41,9 +41,15 @@ public sealed class TrayPresenterTests : IDisposable
 
         presenter.Apply(Model("Workflows: 1", LauncherState.Ready));
         Assert.Equal("LocalCanvas — Ready", _icon.Text);
+        // The identity of the icon object, not only the tooltip text: a
+        // mutant that keeps the first Icon (e.g. icon.Icon ??= ...) would
+        // still leave the tooltip text alone and only this catches it.
+        Assert.Same(_icons.IconFor(LauncherState.Ready), _icon.Icon);
 
         presenter.Apply(Model("Workflows: 1", LauncherState.GatewayDown));
         Assert.Equal("LocalCanvas — Gateway down", _icon.Text);
+        Assert.Same(_icons.IconFor(LauncherState.GatewayDown), _icon.Icon);
+        Assert.NotSame(_icons.IconFor(LauncherState.Ready), _icon.Icon);
     }
 
     [Fact]
@@ -53,14 +59,43 @@ public sealed class TrayPresenterTests : IDisposable
         using var status = new StatusWindow(() => { }, @"X:\LocalCanvas", qr);
         var presenter = new TrayPresenter(_icon, _icons, _menu, () => status);
 
-        presenter.Apply(Model("Workflows: 1"));
-        presenter.Apply(Model("Workflows: 5"));
+        presenter.Apply(Model("Workflows: 1", gatewayLine: "Gateway: Ready"));
+        // The status window's OWN content, not the menu's: a mutant that
+        // drops the `statusWindow()?.Apply(model)` call entirely would still
+        // leave the menu correct and only this catches it.
+        Assert.Equal("Status: Ready", TextOf(status, "Gateway status"));
 
+        presenter.Apply(Model("Workflows: 5", gatewayLine: "Gateway: DOWN"));
+        Assert.Equal("Status: DOWN", TextOf(status, "Gateway status"));
         Assert.Equal("Workflows: 5", MenuWorkflowsText());
     }
 
     private string MenuWorkflowsText() =>
         _menu.Strip.Items.Cast<ToolStripItem>().Single(item => (item.Text ?? string.Empty).StartsWith("Workflows:", StringComparison.Ordinal)).Text!;
+
+    private static string TextOf(Control root, string accessibleName) => Find(root, accessibleName).Text;
+
+    private static Control Find(Control root, string accessibleName)
+    {
+        foreach (Control control in root.Controls)
+        {
+            if (control.AccessibleName == accessibleName)
+            {
+                return control;
+            }
+            if (control.HasChildren)
+            {
+                try
+                {
+                    return Find(control, accessibleName);
+                }
+                catch (InvalidOperationException)
+                {
+                }
+            }
+        }
+        throw new InvalidOperationException($"No control named '{accessibleName}' was found.");
+    }
 
     private sealed class NeverQr : IQrCommand
     {

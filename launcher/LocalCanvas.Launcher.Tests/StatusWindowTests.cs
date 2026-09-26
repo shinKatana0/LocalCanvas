@@ -270,6 +270,61 @@ public sealed class StatusWindowTests : IDisposable
     }
 
     [Fact]
+    public void The_inner_guard_discards_a_result_already_queued_before_it_was_superseded()
+    {
+        // The scenario the OUTER guard (checked right after the await,
+        // before anything is queued) cannot cover: A's endpoint is still the
+        // one expected at that moment, so the outer check passes and its
+        // Apply is queued via BeginInvoke. Only after that is B applied,
+        // superseding A -- so only the guard INSIDE the queued Apply can
+        // still discard A's result once messages are finally pumped.
+        const string EndpointA = "http://192.0.2.10:7801";
+        const string EndpointB = "http://192.0.2.11:7801";
+        var pngPath = Path.Combine(Path.GetTempPath(), $"lc-status-window-test-{Guid.NewGuid():N}.png");
+        File.WriteAllBytes(pngPath, OnePixelPng());
+        try
+        {
+            var holdA = new TaskCompletionSource();
+            _qr.Holds[EndpointA] = holdA;
+            _qr.Result = endpoint => endpoint == EndpointA ? pngPath : null;
+
+            var window = NewWindow();
+            window.Apply(Model(publishedEndpoint: EndpointA));
+            Assert.Equal([EndpointA], _qr.Requested);
+
+            // Completed on a plain background thread, with B not yet
+            // applied: the outer guard for A passes and BeginInvoke(Apply)
+            // is called before Join() below returns. A raw Thread, joined,
+            // not a Task awaited or Wait()ed: showing the window installs a
+            // WindowsFormsSynchronizationContext on this thread, and an
+            // async continuation captured by it would need a message pump
+            // that nothing runs until after this method returns --
+            // deadlocking the test. A plain thread join needs no pump, and
+            // the background thread's own work needs none either
+            // (BeginInvoke only posts a message; it does not wait for it to
+            // be handled).
+            var release = new System.Threading.Thread(() => holdA.SetResult());
+            release.Start();
+            release.Join();
+            System.Threading.Thread.Sleep(200);
+
+            // Only now does B supersede A.
+            window.Apply(Model(publishedEndpoint: EndpointB));
+            Assert.Equal([EndpointA, EndpointB], _qr.Requested);
+
+            PumpMessages();
+
+            Assert.False(IsQrShown(window), "A's result, queued before B superseded it, must still be discarded");
+            Assert.Contains("No pairing QR available", TextOf(window, "QR fallback"), StringComparison.Ordinal);
+            Assert.Equal("Endpoint: " + EndpointB, TextOf(window, "Endpoint"));
+        }
+        finally
+        {
+            File.Delete(pngPath);
+        }
+    }
+
+    [Fact]
     public void Close_hides_the_window_instead_of_disposing_it()
     {
         var window = NewWindow();

@@ -68,32 +68,56 @@ internal sealed class StatusWindow : Form
 
         _qrFallback.Text = "No pairing QR yet.";
 
-        var lines = new FlowLayoutPanel
+        // A TableLayoutPanel, not a FlowLayoutPanel: each control's position
+        // is its assigned row (and column), never the order of the Controls
+        // collection. A FlowLayoutPanel here would let a UI-Automation
+        // Invoke on a button (Narrator's way of pressing one) permanently
+        // reorder the visible rows -- it raises the button's HWND to the top
+        // of the native z-order, and WinForms re-syncs a FlowLayoutPanel's
+        // Controls order to match. A TableLayoutPanel's layout does not
+        // consult that order at all, so the same z-order change has no
+        // visible effect. See StatusWindowLayoutTests for a reproduction and
+        // the regression test.
+        var rows = new Control[]
         {
-            Dock = DockStyle.Fill,
-            FlowDirection = FlowDirection.TopDown,
-            WrapContents = false,
-            AutoScroll = true,
-            Padding = new Padding(12),
-        };
-        lines.Controls.AddRange(
-        [
             _gatewayHeader, _gatewayStatus, _endpoint, _copyAddress, _qrImage, _qrFallback,
             _comfyHeader, _comfyStatus,
             _workflowsHeader, _workflowsReady, _workflowsAttention,
             _problem,
             _restart,
             _log,
-        ]);
+        };
+        var lines = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            Padding = new Padding(12),
+            ColumnCount = 1,
+            RowCount = rows.Length,
+        };
+        lines.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        for (var i = 0; i < rows.Length; i++)
+        {
+            lines.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            lines.Controls.Add(rows[i], 0, i);
+        }
 
-        var buttons = new FlowLayoutPanel
+        // Same reasoning for the two buttons: a fixed cell each, immune to
+        // z-order, rather than a FlowLayoutPanel's RightToLeft ordering.
+        var buttons = new TableLayoutPanel
         {
             Dock = DockStyle.Bottom,
-            FlowDirection = FlowDirection.RightToLeft,
             AutoSize = true,
             Padding = new Padding(8),
+            ColumnCount = 3,
+            RowCount = 1,
         };
-        buttons.Controls.AddRange([_close, _openLogs]);
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        buttons.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        buttons.Controls.Add(_openLogs, 1, 0);
+        buttons.Controls.Add(_close, 2, 0);
 
         Controls.Add(lines);
         Controls.Add(buttons);
