@@ -68,6 +68,16 @@
     starts, so the test suite can point it at a harmless stub instead of
     launching the real, full LocalCanvas.exe during a test run.
 
+.PARAMETER OutputRootPathForTests
+    TEST SEAM ONLY, never used by an ordinary build. Overrides the folder
+    this script treats as artifacts\dev (LocalCanvas\ and .staging\ are
+    created under it). Without this, every pipeline test would build,
+    rebuild and rmtree the REAL repository's own artifacts\dev -- exactly
+    the folder that holds a developer's actual .venv, config\local content
+    and .runtime once they have used this script for real. Every automated
+    test in scripts\tests\run_tests.py passes this and never references the
+    real path at all.
+
 .EXAMPLE
     pwsh .\scripts\build-launcher.ps1
     pwsh .\scripts\build-launcher.ps1 -Run
@@ -78,19 +88,30 @@ param(
     [switch]$SkipPublish,
     [switch]$Run,
     [string]$LauncherProjectPathForTests,
-    [string]$RunStartPathForTests
+    [string]$RunStartPathForTests,
+    [string]$OutputRootPathForTests
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-#: The one repo-relative layout this script ever writes to. Not a parameter:
-#: every dev build lands in the same place on purpose, so a rebuild can find
-#: (and preserve) what an earlier one left there.
+#: The one repo-relative layout an ORDINARY build ever writes to. Every dev
+#: build lands in the same place on purpose, so a rebuild can find (and
+#: preserve) what an earlier one left there. The success banner always names
+#: this fixed label, even under -OutputRootPathForTests (a test-only seam;
+#: see below) -- it describes the real, documented output layout, not
+#: whatever throwaway folder one particular run happened to use.
 $script:DevOutputRelative = 'artifacts\dev\LocalCanvas'
-$script:DevStagingRelative = 'artifacts\dev\.staging'
 $script:ManifestFileName = '.localcanvas-dev-build-manifest.json'
 $script:BuildInfoFileName = 'build-info.json'
+#: A publish directory of this script's OWN, never shared with
+#: launcher\package.ps1's release build (bin\publish\win-x64\). Sharing one
+#: directory meant a dev build's -SkipPublish could silently pick up a
+#: release-stamped exe (or the reverse for package.ps1), so the two now
+#: never touch the same physical output at all -- a build that names one
+#: publishes to the other's private, DEV-only folder regardless of which
+#: ran most recently.
+$script:DevPublishDirRelative = 'bin\publish\win-x64-dev'
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
@@ -108,17 +129,76 @@ $skipPublishRequested = [bool]$SkipPublish
 # functions and returns; see the comment at the bottom of that file.
 . (Join-Path $repoRoot 'launcher\package.ps1')
 
+function Test-LcStaleManifestEntryRemovable {
+    <#
+        May $Relative -- a path read from an EARLIER manifest, not from this
+        run's own staging -- be deleted from $Destination?
+
+        The manifest lives inside the user-writable output folder, so
+        nothing in it is trusted for a deletion just because it is there:
+        every entry is re-checked, independently, against three things.
+        ALL must hold:
+
+          - it resolves ([System.IO.Path]::GetFullPath) strictly inside
+            $Destination -- rejects a "..\..\..." escape outright, string
+            containment alone is not enough;
+          - it is something this script could plausibly have written
+            itself: LocalCanvas.exe, build-info.json, or a path
+            Test-LcPackageEntryAllowed names;
+          - it is never anywhere under .venv\, .runtime\ or config\local\ --
+            except the one allowlisted placeholder, config\local\.gitkeep,
+            which this script does own and already ships.
+
+        Anything that fails any one of these is left alone; the caller
+        reports the skip rather than silently doing nothing.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Relative,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $target = Join-Path $Destination $Relative
+    $resolvedTarget = [System.IO.Path]::GetFullPath($target)
+    $resolvedDestination = [System.IO.Path]::GetFullPath($Destination)
+    $destinationPrefix = $resolvedDestination.TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) +
+        [System.IO.Path]::DirectorySeparatorChar
+    if (-not $resolvedTarget.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        return $false
+    }
+
+    $relativeSlash = $Relative -replace '\\', '/'
+    $isProtected = (
+        $relativeSlash -eq '.venv' -or
+        $relativeSlash.StartsWith('.venv/', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $relativeSlash -eq '.runtime' -or
+        $relativeSlash.StartsWith('.runtime/', [System.StringComparison]::OrdinalIgnoreCase) -or
+        (
+            ($relativeSlash -eq 'config/local' -or
+                $relativeSlash.StartsWith('config/local/', [System.StringComparison]::OrdinalIgnoreCase)) -and
+            $relativeSlash -ne $script:ConfigLocalPlaceholder
+        )
+    )
+    if ($isProtected) { return $false }
+
+    if ($relativeSlash -eq 'LocalCanvas.exe') { return $true }
+    if ($relativeSlash -eq $script:BuildInfoFileName) { return $true }
+    return (Test-LcPackageEntryAllowed -Path $relativeSlash)
+}
+
 $realLauncherProject = Join-Path $repoRoot 'launcher\LocalCanvas.Launcher'
 $launcherProject = if ($LauncherProjectPathForTests) { $LauncherProjectPathForTests } else { $realLauncherProject }
-# Derived from $launcherProject, not always $realLauncherProject: the
-# win-x64 profile's PublishDir is relative to the project being published, so
-# a test that overrides -LauncherProjectPathForTests with its own copy of the
-# project must look for the exe under THAT copy, never under this
-# repository's own launcher\ regardless of what the override points at.
-$publishedExe = Join-Path $launcherProject 'bin\publish\win-x64\LocalCanvas.exe'
+# Derived from $launcherProject, not always $realLauncherProject: a test that
+# overrides -LauncherProjectPathForTests with its own copy of the project
+# must look for the exe under THAT copy, never under this repository's own
+# launcher\ regardless of what the override points at. The directory itself
+# is this script's own ($script:DevPublishDirRelative), never
+# package.ps1's bin\publish\win-x64\ -- see the comment on that constant.
+$publishDir = Join-Path $launcherProject $script:DevPublishDirRelative
+$publishedExe = Join-Path $publishDir 'LocalCanvas.exe'
 
-$destination = Join-Path $repoRoot $script:DevOutputRelative
-$stagingRoot = Join-Path $repoRoot $script:DevStagingRelative
+$devRoot = if ($OutputRootPathForTests) { $OutputRootPathForTests } else { Join-Path $repoRoot 'artifacts\dev' }
+$destination = Join-Path $devRoot 'LocalCanvas'
+$stagingRoot = Join-Path $devRoot '.staging'
 $stagingPackageRoot = Join-Path $stagingRoot 'LocalCanvas'
 $manifestPath = Join-Path $destination $script:ManifestFileName
 $buildInfoPath = Join-Path $destination $script:BuildInfoFileName
@@ -150,6 +230,13 @@ Write-Host "Source: $sourceLabel"
 Invoke-LcLauncherPublish -LauncherProject $launcherProject -PublishedExePath $publishedExe `
     -SkipPublish:$skipPublishRequested `
     -ExtraPublishArgs @(
+        # Overrides the win-x64 profile's own <PublishDir> (bin\publish\
+        # win-x64\): a command-line property is a global property and wins
+        # over one set inside the imported .pubxml, so this dev build's own
+        # output never lands in -- or gets read back from -- the same
+        # physical folder launcher\package.ps1's release build uses. See
+        # $script:DevPublishDirRelative above.
+        "-p:PublishDir=$publishDir\",
         "-p:SourceRevisionId=$shortSha",
         # Without this, the SDK's own AddSourceRevisionToInformationalVersion
         # target never runs unless a SourceLink package is referenced, and
@@ -225,6 +312,24 @@ if ($stagedFiles.Count -ne $owned.Count) {
 }
 Write-Host "Verified: $($stagedFiles.Count) file(s), all on the allowlist, no forbidden pattern present."
 
+# -- destination exe must not be in use -- checked BEFORE any swap, so a
+#    running dev launcher never leaves the destination half-updated --------
+
+$destinationExePath = Join-Path $destination 'LocalCanvas.exe'
+if (Test-Path -LiteralPath $destinationExePath -PathType Leaf) {
+    $handle = $null
+    try {
+        $handle = [System.IO.File]::Open(
+            $destinationExePath, [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    } catch [System.IO.IOException] {
+        throw ("LocalCanvas.exe in $destination is in use - exit the running " +
+            "LocalCanvas from its tray menu, then rebuild.")
+    } finally {
+        if ($handle) { $handle.Dispose() }
+    }
+}
+
 # -- 4. swap: only the files this script owns, guided by its own manifest --
 
 [void](New-Item -ItemType Directory -Path $destination -Force)
@@ -251,8 +356,16 @@ $staleOwned = @($previousOwned | Where-Object { -not $newOwnedSet.Contains($_) }
 # Remove only paths THIS SCRIPT recorded as its own in an earlier run, and
 # that this build no longer wants -- never anything else already in the
 # destination folder, which is exactly where a user's own .venv\,
-# config\local\* content and .runtime\ live.
+# config\local\* content and .runtime\ live. The manifest is a file inside
+# that same user-writable folder, so a tampered or hand-edited entry gets no
+# special trust: Test-LcStaleManifestEntryRemovable re-derives, independently,
+# whether $relative is even something safe to touch before anything is
+# removed, and a rejected entry is reported rather than silently ignored.
 foreach ($relative in $staleOwned) {
+    if (-not (Test-LcStaleManifestEntryRemovable -Relative $relative -Destination $destination)) {
+        Write-Warning "Skipped a manifest entry that is not safe to remove: $relative"
+        continue
+    }
     $target = Join-Path $destination $relative
     if (Test-Path -LiteralPath $target -PathType Leaf) {
         Remove-Item -LiteralPath $target -Force
