@@ -106,13 +106,17 @@ internal sealed partial class StubbedLocalCanvas : IAsyncDisposable
         var stub = Path.Combine(StubEnv, "localcanvas_gateway", "__main__.py");
         Assert.StartsWith(Scratch, stub, StringComparison.OrdinalIgnoreCase);
         var text = File.ReadAllText(stub);
-        const string anchor = "def _config_command(argv):\n";
+        // The copy keeps the line endings of the checkout it came from: CRLF where
+        // git converts them on checkout (as on a CI runner), LF elsewhere. Anchor
+        // and insert in the file's own line ending.
+        var eol = text.Contains("\r\n", StringComparison.Ordinal) ? "\r\n" : "\n";
+        var anchor = "def _config_command(argv):" + eol;
         Assert.Single(Regex.Matches(text, Regex.Escape(anchor)));
         File.WriteAllText(stub, text.Replace(anchor, anchor +
-            "    _flag = os.environ.get(\"LC_TEST_SLOW_CONFIG_FLAG\")\n" +
-            "    if _flag and os.path.exists(_flag):\n" +
-            "        os.remove(_flag)\n" +
-            "        time.sleep(float(os.environ.get(\"LC_TEST_SLOW_CONFIG_SECONDS\") or \"5\"))\n", StringComparison.Ordinal));
+            "    _flag = os.environ.get(\"LC_TEST_SLOW_CONFIG_FLAG\")" + eol +
+            "    if _flag and os.path.exists(_flag):" + eol +
+            "        os.remove(_flag)" + eol +
+            "        time.sleep(float(os.environ.get(\"LC_TEST_SLOW_CONFIG_SECONDS\") or \"5\"))" + eol, StringComparison.Ordinal));
     }
 
     /// <summary>A ComfyUI stand-in of this test's own, not started by LocalCanvas.</summary>
