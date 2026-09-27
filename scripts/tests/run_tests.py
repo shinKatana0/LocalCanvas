@@ -15971,26 +15971,60 @@ class PackageOutputDirectoryPipelineTests(unittest.TestCase):
     unmodified; only when none is there does this class write a small stub
     file for the duration of one test and remove exactly that stub
     afterward -- never a real build artefact, and never a rebuild.
+
+    Cleanup does two things narrowly, on purpose, because getting either
+    wrong is a real hazard rather than a cosmetic one: it deletes the file at
+    that fixed, gitignored path only if its bytes still equal the stub this
+    test wrote (a `dotnet publish`, or a second suite run in the same
+    worktree, landing in the same window must never lose its own real exe to
+    this cleanup); and it removes only the ancestor directories this test
+    itself created -- recorded in setUp, before anything is made -- never one
+    that already existed.
     """
 
     PUBLISH_DIRECTORY = LAUNCHER / "LocalCanvas.Launcher" / "bin" / "publish" / "win-x64"
     PUBLISHED_EXE = PUBLISH_DIRECTORY / "LocalCanvas.exe"
+    STUB_BYTES = (
+        b"stub written only for PackageOutputDirectoryPipelineTests; "
+        b"not a real executable."
+    )
 
     def setUp(self):
         self.workspace = make_temporary_directory(prefix="lc package pipeline ")
         self.addCleanup(shutil.rmtree, self.workspace, True)
         self.stub_written = False
+        self.created_directories = []
         if not self.PUBLISHED_EXE.is_file():
+            # Deepest first: every ancestor of PUBLISH_DIRECTORY that does
+            # not exist YET, stopping at the first one that does -- exactly
+            # what this test is about to create, and the only directories
+            # its own cleanup may ever remove.
+            directory = self.PUBLISH_DIRECTORY
+            while not directory.exists():
+                self.created_directories.append(directory)
+                directory = directory.parent
             self.PUBLISH_DIRECTORY.mkdir(parents=True, exist_ok=True)
-            self.PUBLISHED_EXE.write_bytes(
-                b"stub written only for PackageOutputDirectoryPipelineTests; "
-                b"not a real executable.")
+            self.PUBLISHED_EXE.write_bytes(self.STUB_BYTES)
             self.stub_written = True
             self.addCleanup(self.remove_stub)
 
     def remove_stub(self):
         if self.stub_written and self.PUBLISHED_EXE.is_file():
-            self.PUBLISHED_EXE.unlink()
+            try:
+                current_bytes = self.PUBLISHED_EXE.read_bytes()
+            except OSError:
+                current_bytes = None
+            # Only ever the exact bytes this setUp wrote -- a real publish
+            # (or another run of this same class) landing here in the
+            # meantime is left completely alone, real exe and all.
+            if current_bytes == self.STUB_BYTES:
+                self.PUBLISHED_EXE.unlink()
+        for directory in self.created_directories:
+            try:
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass
 
     def run_package(self, output_directory):
         """`pwsh -File launcher\\package.ps1 -OutputDirectory <it> -SkipPublish`.
@@ -16052,15 +16086,27 @@ class PackageOutputDirectoryPipelineTests(unittest.TestCase):
 
 
 class PackageScriptDeletionLintTests(unittest.TestCase):
-    """A syntax-tree guard over launcher\\package.ps1's own Remove-Item calls.
+    """A syntax-tree guard over launcher\\package.ps1's own deletions.
 
     Reads the script's own AST rather than running it, which is what closes
     the gap PackageOutputDirectoryPipelineTests' functional runs cannot on
     their own generalise past the exact mutation they were built against:
-    every Remove-Item anywhere in the file names only $stagingRoot or $zipPath
-    by -LiteralPath -- never $OutputDirectory, and never a bare -Path -- and
-    the one call to Assert-LcSafeOutputDirectory in the run path (outside any
-    function) precedes the first write there.
+    every deletion anywhere in the file -- Remove-Item under any alias or
+    module qualifier, and every .NET Delete/Move member call -- names only
+    $stagingRoot or $zipPath as its target, never $OutputDirectory and never
+    a bare -Path; and the one call to Assert-LcSafeOutputDirectory in the run
+    path (outside any function) precedes the first write there.
+
+    Matching the literal string 'Remove-Item' and only CommandAst nodes, as
+    an earlier version of this class did, misses a call written as one of
+    its own aliases (rm, del, ri, rd, erase, rmdir), one written
+    module-qualified (Microsoft.PowerShell.Management\\Remove-Item), and any
+    .NET delete or move -- [System.IO.Directory]::Delete(...) is a member
+    invocation, not a command, and never shows up as a CommandAst at all.
+    Both gaps are closed below, and test_the_scan_recognises_a_planted_alias_
+    and_a_planted_net_delete proves this scan actually notices a planted
+    example of each -- inertly, inside an `if ($false)` that can never run --
+    rather than trusting that it would.
     """
 
     ALLOWED_LITERAL_PATH_TARGETS = ("$stagingRoot", "$zipPath")
@@ -16085,18 +16131,67 @@ function Get-EnclosingFunctionName {
     return ''
 }
 
+function Resolve-ToCommandName {
+    <#
+        The command a call site actually runs, past an alias and past a
+        module qualifier: 'rm', 'ri', 'rd', 'del', 'erase', 'rmdir' and
+        'Microsoft.PowerShell.Management\Remove-Item' all resolve to
+        'Remove-Item' here.
+
+        Hops through .Definition, a STRING, rather than .ResolvedCommand, an
+        AliasInfo's own object reference to the command it points to: for a
+        built-in alias like 'rm', measured, .ResolvedCommand is $null even
+        though .Definition correctly reads 'Remove-Item' -- so a walk that
+        only ever followed .ResolvedCommand (as the WMI call-site lint
+        elsewhere in this file does, for its own, narrower set of aliases)
+        would silently stop at the first hop for exactly the built-in
+        aliases this check most needs to see through.
+
+        The backslash a module-qualified name carries is looked for with
+        String.Contains/LastIndexOf against a literal character, not a
+        regular expression: '\' alone is not a valid pattern for -match (an
+        unescaped backslash at the end of a regex is illegal), so a version
+        of this written with -match here would throw on every call, aliased
+        module-qualified or not, and still (by accident, since the illegal
+        pattern always fails the same way) count as "no backslash found."
+    #>
+    param([string]$Written)
+    if (-not $Written) { return $Written }
+    $separator = [char]92
+    $bare = $Written
+    if ($bare.Contains($separator)) { $bare = $bare.Substring($bare.LastIndexOf($separator) + 1) }
+    $command = $null
+    try { $command = Get-Command -Name $Written -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    if (-not $command -and $bare -ne $Written) {
+        try { $command = Get-Command -Name $bare -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    }
+    $hops = 0
+    while ($command -and $command.CommandType -eq 'Alias' -and $hops -lt 8) {
+        $next = $command.Definition
+        if (-not $next) { break }
+        $following = $null
+        try { $following = Get-Command -Name $next -ErrorAction Stop | Select-Object -First 1 } catch { $following = $null }
+        if (-not $following) { return $next }
+        $command = $following
+        $hops++
+    }
+    if ($command) { return $command.Name }
+    return $bare
+}
+
 $writeCommandNames = @('New-Item', 'Remove-Item', 'Copy-Item', 'Set-Content')
 $removeItems = @()
 $writes = @()
 $assertCalls = @()
 
 foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-    $name = $command.GetCommandName()
-    if (-not $name) { continue }
+    $written = $command.GetCommandName()
+    if (-not $written) { continue }
+    $resolved = Resolve-ToCommandName -Written $written
     $enclosing = Get-EnclosingFunctionName -Node $command
     $elements = $command.CommandElements
 
-    if ($name -eq 'Remove-Item') {
+    if ($resolved -eq 'Remove-Item') {
         $literalPathText = $null
         $usedPathInstead = $false
         for ($i = 1; $i -lt $elements.Count; $i++) {
@@ -16113,17 +16208,64 @@ foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automati
         $removeItems += [pscustomobject]@{
             line = $command.Extent.StartLineNumber
             enclosingFunction = $enclosing
+            writtenAs = $written
             literalPathText = $literalPathText
             usedPathInstead = $usedPathInstead
             text = $command.Extent.Text
         }
     }
 
-    if ($enclosing -eq '' -and $writeCommandNames -contains $name) {
-        $writes += [pscustomobject]@{ line = $command.Extent.StartLineNumber; name = $name }
+    # $resolved, not $written: a write reached through an alias must still
+    # count as that write for the ordering check below.
+    if ($enclosing -eq '' -and $writeCommandNames -contains $resolved) {
+        $writes += [pscustomobject]@{ line = $command.Extent.StartLineNumber; name = $resolved }
     }
-    if ($enclosing -eq '' -and $name -eq 'Assert-LcSafeOutputDirectory') {
+    if ($enclosing -eq '' -and $resolved -eq 'Assert-LcSafeOutputDirectory') {
         $assertCalls += [pscustomobject]@{ line = $command.Extent.StartLineNumber; text = $command.Extent.Text }
+    }
+}
+
+# .NET deletions and moves never appear as a CommandAst at all -- they are
+# member-invocation EXPRESSIONS ([System.IO.Directory]::Delete(...), or an
+# instance's own .Delete()/.Move()) -- so the command-name walk above,
+# however thorough, could never see them. Every one anywhere in the file
+# (position and enclosing function do not matter here: this is the same
+# file-wide "never anything but the two safe names" rule the Remove-Item
+# check above applies) is recorded so the tests below can name its target.
+$deleteOrMoveTypeNames = @(
+    'Directory', 'File', 'DirectoryInfo', 'FileInfo',
+    'IO.Directory', 'IO.File', 'IO.DirectoryInfo', 'IO.FileInfo',
+    'System.IO.Directory', 'System.IO.File', 'System.IO.DirectoryInfo', 'System.IO.FileInfo'
+)
+$memberDeletes = @()
+foreach ($member in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+    $memberName = "$($member.Member.Value)"
+    if ($memberName -notin @('Delete', 'Move')) { continue }
+    $enclosing = Get-EnclosingFunctionName -Node $member
+    $isRelevantType = $false
+    $targetText = $null
+    if ($member.Static) {
+        $typeName = "$($member.Expression.TypeName.FullName)"
+        if ($deleteOrMoveTypeNames -contains $typeName) { $isRelevantType = $true }
+        if ($member.Arguments -and $member.Arguments.Count -gt 0) {
+            $targetText = $member.Arguments[0].Extent.Text.Trim()
+        }
+    } else {
+        # Instance call: every instance .Delete()/.Move() is treated as
+        # relevant regardless of the object's declared type -- this script
+        # has none today, so being strict here costs nothing and closes the
+        # door on a future one going unnoticed for want of type inference.
+        $isRelevantType = $true
+        $targetText = $member.Expression.Extent.Text.Trim()
+    }
+    if (-not $isRelevantType) { continue }
+    $memberDeletes += [pscustomobject]@{
+        line = $member.Extent.StartLineNumber
+        enclosingFunction = $enclosing
+        static = [bool]$member.Static
+        member = $memberName
+        targetText = $targetText
+        text = $member.Extent.Text
     }
 }
 
@@ -16133,25 +16275,25 @@ if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line
 
 [pscustomobject]@{
     removeItems = @($removeItems)
+    memberDeletes = @($memberDeletes)
     firstTopLevelWriteLine = $firstTopLevelWriteLine
     topLevelAssertCalls = @($assertCalls | Sort-Object line)
 } | ConvertTo-Json -Depth 4 -Compress
 """
 
-    def scan(self):
+    def scan(self, path=None):
         env = dict(os.environ)
-        env["LC_PACKAGE_LINT_PATH"] = str(PACKAGE_SCRIPT)
+        env["LC_PACKAGE_LINT_PATH"] = str(path if path is not None else PACKAGE_SCRIPT)
         result = subprocess.run(
             [PWSH, "-NoProfile", "-NonInteractive", "-Command", self.SCAN_SCRIPT],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=60, env=env, cwd=str(REPO), stdin=subprocess.DEVNULL)
         if result.returncode != 0:
-            raise AssertionError("the syntax-tree scan of package.ps1 failed:\n" +
+            raise AssertionError("the syntax-tree scan failed:\n" +
                                   (result.stdout or "") + (result.stderr or ""))
         return json.loads(result.stdout)
 
-    def test_every_remove_item_targets_only_staging_or_the_zip_by_literal_path(self):
-        result = self.scan()
+    def remove_item_offenders(self, result):
         offenders = []
         for item in result["removeItems"]:
             where = "line {} ({}): {}".format(
@@ -16162,7 +16304,25 @@ if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line
             if item["literalPathText"] not in self.ALLOWED_LITERAL_PATH_TARGETS:
                 offenders.append(where + " -- -LiteralPath {} is not $stagingRoot or $zipPath".format(
                     item["literalPathText"]))
-        self.assertEqual([], offenders, "\n".join(offenders))
+        return offenders
+
+    def member_delete_offenders(self, result):
+        offenders = []
+        for item in result["memberDeletes"]:
+            where = "line {} ({}): {}".format(
+                item["line"], item["enclosingFunction"] or "the run path", item["text"])
+            if item["targetText"] not in self.ALLOWED_LITERAL_PATH_TARGETS:
+                offenders.append(where + " -- .{} target {} is not $stagingRoot or $zipPath".format(
+                    item["member"], item["targetText"]))
+        return offenders
+
+    def test_every_remove_item_targets_only_staging_or_the_zip_by_literal_path(self):
+        result = self.scan()
+        self.assertEqual([], self.remove_item_offenders(result), self.remove_item_offenders(result))
+
+    def test_every_net_delete_or_move_targets_only_staging_or_the_zip(self):
+        result = self.scan()
+        self.assertEqual([], self.member_delete_offenders(result), self.member_delete_offenders(result))
 
     def test_the_ownership_check_runs_before_the_first_top_level_write(self):
         result = self.scan()
@@ -16177,6 +16337,41 @@ if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line
             calls[0]["line"], first_write_line,
             "Assert-LcSafeOutputDirectory (line {}) must run before the first top-level write (line {})".format(
                 calls[0]["line"], first_write_line))
+
+    def test_the_scan_recognises_a_planted_alias_and_a_planted_net_delete(self):
+        """The self-check: plant both forms inertly and confirm the scan sees them.
+
+        Everything below sits inside `if ($false) { ... }`, so nothing here
+        ever runs -- proving the SCAN notices these shapes is the only point,
+        never exercising what they would do. Without this, a scan that
+        quietly stopped resolving aliases (or stopped looking for member
+        deletes at all) would report a clean bill of health for the wrong
+        reason: nothing left to find, rather than nothing there to find.
+        """
+        fixture_directory = make_temporary_directory(prefix="lc package lint fixture ")
+        self.addCleanup(shutil.rmtree, fixture_directory, True)
+        fixture = fixture_directory / "planted.ps1"
+        fixture.write_text(
+            "# Deliberately unreachable -- proves the scan sees these forms,\n"
+            "# never that they run.\n"
+            "if ($false) {\n"
+            "    rm -LiteralPath $OutputDirectory -Recurse -Force\n"
+            "    Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $OutputDirectory -Recurse -Force\n"
+            "    [System.IO.Directory]::Delete($OutputDirectory, $true)\n"
+            "}\n",
+            encoding="utf-8")
+        result = self.scan(fixture)
+        remove_item_offenders = self.remove_item_offenders(result)
+        member_offenders = self.member_delete_offenders(result)
+        self.assertEqual(2, len(remove_item_offenders),
+                          "expected the alias (rm) and the module-qualified call to both be "
+                          "flagged: {}".format(remove_item_offenders))
+        self.assertEqual(1, len(member_offenders),
+                          "expected the planted [System.IO.Directory]::Delete to be flagged: {}".format(
+                              member_offenders))
+        # And the real script, scanned by the same mechanism, still reports none.
+        self.assertEqual([], self.remove_item_offenders(self.scan()))
+        self.assertEqual([], self.member_delete_offenders(self.scan()))
 
 
 class TemporaryPathSpellingTests(unittest.TestCase):
