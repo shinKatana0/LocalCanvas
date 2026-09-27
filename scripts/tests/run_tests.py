@@ -78,6 +78,10 @@ COMFY_EXAMPLE_MANIFEST = REPO / "config" / "examples" / "comfy-bootstrap.example
 # user-facing entry point (see MAINTAINER_SCRIPTS below).
 LAUNCHER = REPO / "launcher"
 PACKAGE_SCRIPT = LAUNCHER / "package.ps1"
+# The local developer build (T-0380): a maintainer tool too, never something
+# a user runs -- see MAINTAINER_SCRIPTS below.
+BUILD_LAUNCHER_SCRIPT = SCRIPTS / "build-launcher.ps1"
+DEV_BUILD_OUTPUT_ROOT = REPO / "artifacts" / "dev"
 
 POLL_INTERVAL = 0.05
 
@@ -788,6 +792,7 @@ HELPER_SCRIPTS = (
 MAINTAINER_SCRIPTS = (
     "launcher/package.ps1",
     "launcher/tools/generate-icons.ps1",
+    "scripts/build-launcher.ps1",
 )
 
 
@@ -1959,6 +1964,24 @@ def comfy_sources():
     directory boundary is a lint the next script walks around.
     """
     return powershell_sources_under(COMFY)
+
+
+def tracked_status(repo):
+    """`git status --porcelain` against ``repo``, or ``None`` if git failed.
+
+    Used by BuildLauncherPipelineTests to prove a dev build never modifies a
+    TRACKED file: an ignored path (artifacts/, .venv/, ...) never appears in
+    this output at all, so a build that only ever writes there leaves this
+    string identical before and after -- while a build that touched, say, a
+    tracked script by mistake would show up here immediately.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def tracked_powershell_sources():
@@ -14903,6 +14926,7 @@ PUBLIC_GITIGNORE_RULES = [
     "launcher/**/obj/",
     "launcher/**/TestResults/",
     "launcher/dist/",
+    "artifacts/",
     "app/android/key.properties",
     "*.jks",
     "*.keystore",
@@ -15529,6 +15553,14 @@ class PowerShellVersionGateTests(unittest.TestCase):
         walks are not quietly doing the work. Second: git's answer is compared
         with what the walks alone would find, and any tracked .ps1 outside
         scripts/ and comfy/ is shown to be in the first and not the second.
+
+        Most maintainer scripts live outside both directories (launcher/) and
+        are exactly what this half exists to catch; scripts/build-launcher.ps1
+        is a maintainer script that happens to live INSIDE scripts/, so the
+        walk over that directory finds it too -- correctly, since the walk is
+        a superset-by-union, not a guess at which files are maintainer tools.
+        The comparison below therefore expects only the MAINTAINER_SCRIPTS
+        entries the walk genuinely cannot see, not the whole list.
         """
         tracked = tracked_powershell_sources()
         self.assertIsNotNone(
@@ -15538,12 +15570,13 @@ class PowerShellVersionGateTests(unittest.TestCase):
             sorted(path.relative_to(REPO).as_posix() for path in tracked))
 
         walked = set(powershell_sources_under(SCRIPTS) + comfy_sources())
+        walked_relative = {path.relative_to(REPO).as_posix() for path in walked}
         outside = [path for path in tracked if path not in walked]
-        # None today -- every tracked .ps1 does live under scripts/ or comfy/ --
-        # so the claim that matters is the mechanism, asserted directly: a path
-        # at the root is in git's answer and not in the walks'.
+        # Every tracked .ps1 the walk cannot see is exactly the MAINTAINER_SCRIPTS
+        # entries that live outside scripts/ and comfy/ -- a path at the root
+        # (below) is one more example of the same thing.
         self.assertEqual(
-            sorted(MAINTAINER_SCRIPTS),
+            sorted(name for name in MAINTAINER_SCRIPTS if name not in walked_relative),
             sorted(path.relative_to(REPO).as_posix() for path in outside),
             "unclassified tracked .ps1 outside the walks")
         at_the_root = REPO / "a tool at the root.ps1"
@@ -16372,6 +16405,386 @@ if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line
         # And the real script, scanned by the same mechanism, still reports none.
         self.assertEqual([], self.remove_item_offenders(self.scan()))
         self.assertEqual([], self.member_delete_offenders(self.scan()))
+
+
+class BuildLauncherScriptLintTests(unittest.TestCase):
+    """Static checks over scripts\\build-launcher.ps1's own text (T-0380).
+
+    This is NOT a second launcher, and it must never grow into one: it shares
+    launcher\\package.ps1's allowlist, version reader and publish step
+    (Invoke-LcLauncherPublish) rather than keeping its own copy, it publishes
+    the SAME win-x64 profile the release zip uses, and it never signs, and
+    never touches Smart App Control, Defender or any machine policy -- the
+    developer decisions this card must not reopen. Reading the file's own
+    text catches a regression the functional tests below cannot generalise
+    past: a mutation that adds a second, unused definition, or a call to one
+    of the forbidden tools placed somewhere a functional run never exercises.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = BUILD_LAUNCHER_SCRIPT.read_text(encoding="utf-8-sig")
+
+    def test_the_gate_is_the_very_first_line(self):
+        self.assertEqual(ENTRY_SCRIPT_REQUIRES, self.text.splitlines()[0])
+
+    def test_it_is_a_maintainer_script_not_an_entry_script(self):
+        # ENTRY_SCRIPT_BANNER ("LocalCanvas") is not a useful string to look
+        # for here: this script's whole subject is building LocalCanvas, so
+        # the word appears constantly in ordinary prose. What actually
+        # decides "maintainer, not entry" is the two lists themselves.
+        self.assertIn("scripts/build-launcher.ps1", MAINTAINER_SCRIPTS)
+        self.assertNotIn("scripts/build-launcher.ps1", ENTRY_SCRIPTS)
+
+    def test_it_reuses_package_ps1_and_defines_none_of_the_shared_functions_itself(self):
+        """No duplicated allowlist, version reader or publish step.
+
+        The brief is explicit that this script must reuse launcher\\package.ps1
+        rather than copy its logic. Checked two ways: the dot-source call is
+        present, and none of the four functions that call defines is
+        redefined here (a copy that silently drifted from the original is
+        exactly what "one allowlist, one publish step" is meant to prevent).
+        """
+        self.assertIn("launcher\\package.ps1", self.text)
+        self.assertRegex(self.text, r"(?m)^\s*\.\s*\(Join-Path \$repoRoot 'launcher\\package\.ps1'\)")
+        for name in (
+            "Test-LcPackageEntryAllowed", "Test-LcPackageEntryForbidden",
+            "Get-LcPackageVersion", "Invoke-LcLauncherPublish",
+        ):
+            with self.subTest(function=name):
+                self.assertNotRegex(
+                    self.text, r"(?im)^\s*function\s+{}\b".format(re.escape(name)),
+                    "{} must not be redefined here -- it is dot-sourced from package.ps1".format(name))
+
+    def test_it_never_overrides_the_release_publish_profile(self):
+        """The exact same win-x64, self-contained, single-file profile.
+
+        Invoke-LcLauncherPublish (package.ps1) is the only place
+        '-p:PublishProfile' is set; this script must never pass a competing
+        one, nor override RuntimeIdentifier or SelfContained itself -- doing
+        so would make the dev exe behave differently from the release one,
+        which the developer instruction forbids.
+        """
+        self.assertNotIn("PublishProfile=", self.text)
+        self.assertNotIn("-p:RuntimeIdentifier", self.text)
+        self.assertNotIn("-p:SelfContained", self.text)
+
+    def test_it_never_attempts_to_sign_anything(self):
+        lowered = self.text.lower()
+        for forbidden in ("signtool", "set-authenticodesignature", "authenticode"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+
+    def test_it_never_touches_smart_app_control_defender_or_any_machine_policy(self):
+        """Developer decisions this card must not reopen, held as a lint.
+
+        Read-only OBSERVATION of Smart App Control after a build is a
+        separate, manual step (see the brief) and is deliberately not part of
+        this script at all -- so none of these strings has any business
+        appearing here, not even in a comment.
+        """
+        lowered = self.text.lower()
+        forbidden_substrings = (
+            "set-mppreference", "set-executionpolicy", "set-netfirewallprofile",
+            "set-netfirewallrule", "disable-netfirewallrule", "set-cipolicy",
+            "verifiedandreputablepolicystate", "unblock-file",
+        )
+        for forbidden in forbidden_substrings:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+        self.assertNotIn("Smart App Control", self.text)
+
+    def test_it_never_kills_or_signals_a_process_and_run_is_a_plain_start(self):
+        """-Run starts a process and does nothing else to any process.
+
+        ProcessOwnershipLintTests already scans every tracked .ps1, including
+        this one, for a process addressed by anything but its own PID -- this
+        adds the narrower, script-specific claim the brief makes: -Run itself
+        is a plain Start-Process, with no -Wait and nothing that could stop or
+        signal an existing instance.
+        """
+        self.assertNotIn("Stop-Process", self.text)
+        self.assertNotIn("Get-Process", self.text)
+        self.assertIn("Start-Process", self.text)
+        # Real call sites only: "Start-Process -FilePath ..." -- not the
+        # comment-block prose above that also mentions the cmdlet by name
+        # ("a plain Start-Process, no -Wait"), which is not followed by a
+        # parameter and so never matches this stricter pattern.
+        call_sites = re.findall(r"(?m)^\s*Start-Process\s+-.*$", self.text)
+        self.assertGreater(len(call_sites), 0, "no real Start-Process call site found")
+        for line in call_sites:
+            with self.subTest(line=line):
+                self.assertNotIn("-Wait", line)
+
+    def test_it_names_no_developer_specific_absolute_path(self):
+        """Every path is built from $PSScriptRoot / $repoRoot, never hard-coded.
+
+        A drive-letter path (``C:\\...``) anywhere in the file would be a
+        specific machine's layout leaking into a script every clone runs --
+        exactly what AGENTS.md section C forbids. None is expected, in code
+        or in a comment.
+        """
+        hits = re.findall(r"[A-Za-z]:\\\\?[^\s'\"]*", self.text)
+        self.assertEqual([], hits)
+
+    def test_it_computes_the_repository_root_from_its_own_location(self):
+        self.assertIn("$PSScriptRoot", self.text)
+        self.assertRegex(self.text, r"\$repoRoot\s*=\s*\(Resolve-Path \(Join-Path \$PSScriptRoot '\.\.'\)\)")
+
+
+class BuildLauncherPipelineTests(unittest.TestCase):
+    """The REAL scripts\\build-launcher.ps1, run end to end (T-0380).
+
+    Unlike launcher\\package.ps1's -OutputDirectory, this script's output
+    location is fixed by the brief (artifacts\\dev\\LocalCanvas\\, always
+    relative to the real repository root), so these tests run the real
+    script against THIS repository's own checkout and clean up
+    artifacts\\dev\\ afterwards -- never anything else in the tree, and never
+    a real self-contained publish unless a test says so explicitly (most use
+    -SkipPublish with a small stub exe, exactly as
+    PackageOutputDirectoryPipelineTests does for launcher\\package.ps1, so
+    that most of this class stays fast).
+    """
+
+    STUB_BYTES = (
+        b"stub written only for BuildLauncherPipelineTests; "
+        b"not a real executable."
+    )
+    PUBLISH_DIRECTORY = LAUNCHER / "LocalCanvas.Launcher" / "bin" / "publish" / "win-x64"
+    PUBLISHED_EXE = PUBLISH_DIRECTORY / "LocalCanvas.exe"
+
+    def setUp(self):
+        self.stub_written = False
+        self.created_directories = []
+        if not self.PUBLISHED_EXE.is_file():
+            directory = self.PUBLISH_DIRECTORY
+            while not directory.exists():
+                self.created_directories.append(directory)
+                directory = directory.parent
+            self.PUBLISH_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            self.PUBLISHED_EXE.write_bytes(self.STUB_BYTES)
+            self.stub_written = True
+            self.addCleanup(self.remove_stub)
+        self.addCleanup(self.remove_dev_output)
+
+    def remove_stub(self):
+        if self.stub_written and self.PUBLISHED_EXE.is_file():
+            try:
+                current_bytes = self.PUBLISHED_EXE.read_bytes()
+            except OSError:
+                current_bytes = None
+            # Only ever the exact bytes this setUp wrote -- a real publish (or
+            # another run of this same class) landing here in the meantime is
+            # left completely alone, real exe and all.
+            if current_bytes == self.STUB_BYTES:
+                self.PUBLISHED_EXE.unlink()
+        for directory in self.created_directories:
+            try:
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass
+
+    def remove_dev_output(self):
+        shutil.rmtree(DEV_BUILD_OUTPUT_ROOT, ignore_errors=True)
+
+    def run_build(self, *extra_args, timeout=120):
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-File", str(BUILD_LAUNCHER_SCRIPT),
+             "-SkipPublish", *extra_args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout, cwd=str(REPO),
+        )
+
+    def dev_output(self):
+        return DEV_BUILD_OUTPUT_ROOT / "LocalCanvas"
+
+    def snapshot(self, root):
+        """Every file under ``root``, by relative path, with its own SHA-256.
+
+        Used to prove a failed build left a PREVIOUS successful build's
+        output byte-for-byte alone -- a size-only check would miss a file
+        quietly rewritten with different, same-length content.
+        """
+        if not root.exists():
+            return {}
+        found = {}
+        for path in sorted(root.rglob("*")):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(root).as_posix()
+            found[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return found
+
+    def test_a_successful_build_produces_the_expected_layout(self):
+        """Tests 1-5: one command, a stable path, the exe, and no side effect
+        on any tracked file."""
+        before = tracked_status(REPO)
+        result = self.run_build()
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("LocalCanvas developer build ready:", output)
+        expected_relative_exe = str(Path("artifacts") / "dev" / "LocalCanvas" / "LocalCanvas.exe")
+        self.assertIn(expected_relative_exe, output)
+
+        exe = self.dev_output() / "LocalCanvas.exe"
+        self.assertTrue(exe.is_file(), output)
+        # Whatever the shared publish step produced -- the stub this class
+        # writes when nothing real is there, or a real exe another test (or
+        # an earlier `dotnet publish` in this worktree) already left behind
+        # -- the staged exe must be that SAME file, copied byte for byte,
+        # never re-encoded or replaced by anything else.
+        self.assertEqual(self.PUBLISHED_EXE.read_bytes(), exe.read_bytes(),
+                          "the staged exe must be the exact bytes the shared publish step wrote")
+
+        manifest_path = self.dev_output() / ".localcanvas-dev-build-manifest.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIn("LocalCanvas.exe", manifest["owned_files"])
+        self.assertIn("scripts\\setup.ps1", manifest["owned_files"])
+
+        build_info_path = self.dev_output() / "build-info.json"
+        self.assertTrue(build_info_path.is_file())
+        build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {"version", "source", "dirty", "configuration", "built_utc"}, set(build_info.keys()))
+        self.assertEqual("Release", build_info["configuration"])
+        self.assertRegex(build_info["source"], r"^[0-9a-f]{4,40}$")
+
+        after = tracked_status(REPO)
+        self.assertEqual(before, after, "a build must never modify a tracked file")
+
+    def test_the_output_path_is_stable_across_rebuilds(self):
+        """Test 2: the exe always lands at the same repo-relative path."""
+        expected_relative_exe = str(Path("artifacts") / "dev" / "LocalCanvas" / "LocalCanvas.exe")
+        for _ in range(2):
+            result = self.run_build()
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn(expected_relative_exe, result.stdout)
+            self.assertTrue((self.dev_output() / "LocalCanvas.exe").is_file())
+
+    def test_a_forced_publish_failure_leaves_the_previous_output_untouched(self):
+        """Test 6: a real compile failure, on a throwaway copy, never the
+        real launcher sources -- proves stale-build protection end to end."""
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        before = self.snapshot(self.dev_output())
+        self.assertIn("LocalCanvas.exe", before, "nothing to protect if the first build did not succeed")
+
+        broken_project = make_temporary_directory(prefix="lc build launcher broken ")
+        self.addCleanup(shutil.rmtree, broken_project, True)
+        (broken_project / "broken.csproj").write_text(
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+            "  <PropertyGroup>\n"
+            "    <OutputType>Exe</OutputType>\n"
+            "    <TargetFramework>net10.0</TargetFramework>\n"
+            "  </PropertyGroup>\n"
+            "</Project>\n",
+            encoding="utf-8")
+        (broken_project / "Program.cs").write_text(
+            "this is not valid C# @@@ -- a deliberate, forced compile failure\n",
+            encoding="utf-8")
+
+        result = subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-File", str(BUILD_LAUNCHER_SCRIPT),
+             "-LauncherProjectPathForTests", str(broken_project)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=180, cwd=str(REPO))
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertNotIn("developer build ready", output)
+        after = self.snapshot(self.dev_output())
+        self.assertEqual(before, after,
+                          "a failed build must leave the previous output byte-for-byte untouched")
+
+    def test_run_starts_the_built_exe_through_the_seam_and_never_waits(self):
+        """Test 11: -Run, and single instance is entirely the exe's own business."""
+        workspace = make_temporary_directory(prefix="lc build launcher run ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        stub_target = workspace / "run target.cmd"
+        stub_target.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+        started_at = time.monotonic()
+        result = self.run_build("-Run", "-RunStartPathForTests", str(stub_target))
+        elapsed = time.monotonic() - started_at
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("Starting: " + str(stub_target), output)
+        # "No waiting": Start-Process without -Wait returns immediately, so
+        # the whole build+run finishes in a few seconds, never anywhere near
+        # how long a real launcher's own tray lifecycle would take to exit.
+        self.assertLess(elapsed, 30, "the run took long enough to suggest something waited")
+
+    def test_a_rebuild_preserves_owner_state_and_removes_only_stale_owned_files(self):
+        """Test 12: .venv, config\\local\\* and .runtime\\ survive a rebuild;
+        a file this script owned in an earlier build but no longer wants is
+        removed by its exact recorded path, nothing else."""
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+
+        root = self.dev_output()
+        venv_marker = root / ".venv" / "Scripts" / "python.exe"
+        venv_marker.parent.mkdir(parents=True, exist_ok=True)
+        venv_marker.write_text("fake venv", encoding="utf-8")
+        config_marker = root / "config" / "local" / "runtime.yaml"
+        config_marker.write_text("user config", encoding="utf-8")
+        # A path with a space in the owner's own configuration folder.
+        spaced_marker = root / "config" / "local" / "notes the user left.txt"
+        spaced_marker.write_text("owner note", encoding="utf-8")
+        runtime_marker = root / ".runtime" / "gateway.pid"
+        runtime_marker.parent.mkdir(parents=True, exist_ok=True)
+        runtime_marker.write_text("12345", encoding="utf-8")
+
+        manifest_path = root / ".localcanvas-dev-build-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["owned_files"].append("a-stale-owned-file.txt")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        stale_file = root / "a-stale-owned-file.txt"
+        stale_file.write_text("stale", encoding="utf-8")
+
+        second = self.run_build()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+
+        self.assertEqual("fake venv", venv_marker.read_text(encoding="utf-8"))
+        self.assertEqual("user config", config_marker.read_text(encoding="utf-8"))
+        self.assertEqual("owner note", spaced_marker.read_text(encoding="utf-8"))
+        self.assertEqual("12345", runtime_marker.read_text(encoding="utf-8"))
+        self.assertFalse(
+            stale_file.exists(),
+            "a file this script owned in an earlier build must be removed once no longer wanted")
+
+    def test_a_launcher_project_at_a_path_with_a_space_publishes_and_builds(self):
+        """Test 7: a real dotnet publish, at a path with a space in it.
+
+        The one test in this class that does not use -SkipPublish: it copies
+        the real launcher project (never edits it) into a throwaway directory
+        whose own path contains a space, and publishes THAT copy through the
+        same -LauncherProjectPathForTests seam the forced-failure test above
+        uses, proving the whole publish-and-verify path handles a space
+        correctly rather than only the parts -SkipPublish exercises.
+        """
+        workspace = make_temporary_directory(prefix="lc build launcher space ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        spaced_project = workspace / "dev build project"
+        shutil.copytree(
+            LAUNCHER / "LocalCanvas.Launcher", spaced_project,
+            ignore=shutil.ignore_patterns("bin", "obj", "TestResults"))
+        shutil.copy2(LAUNCHER / "Directory.Build.props", spaced_project / "Directory.Build.props")
+
+        result = subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-File", str(BUILD_LAUNCHER_SCRIPT),
+             "-LauncherProjectPathForTests", str(spaced_project)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=180, cwd=str(REPO))
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("LocalCanvas developer build ready:", output)
+        published_exe = spaced_project / "bin" / "publish" / "win-x64" / "LocalCanvas.exe"
+        self.assertTrue(published_exe.is_file(), output)
+        self.assertGreater(published_exe.stat().st_size, 1_000_000, "not a real self-contained publish")
+        dest_exe = self.dev_output() / "LocalCanvas.exe"
+        self.assertTrue(dest_exe.is_file())
+        self.assertEqual(published_exe.read_bytes(), dest_exe.read_bytes())
 
 
 class TemporaryPathSpellingTests(unittest.TestCase):
@@ -27382,6 +27795,7 @@ CI_GROUPS = {
         "PublicTreeNamesNoCheckoutTests",
         "PowerShellVersionGateTests", "PackageOutputDirectorySafetyTests",
         "PackageOutputDirectoryPipelineTests", "PackageScriptDeletionLintTests",
+        "BuildLauncherScriptLintTests", "BuildLauncherPipelineTests",
         "TemporaryPathSpellingTests",
         "InterpreterGuardTests", "SuiteDependencyGuardTests",
     ],
