@@ -195,7 +195,7 @@ is the reference for everything `runtime.yaml` can hold.
 
 ### When setup finishes
 
-The window prints a blank line and **"Press Enter to close this window."**
+The window prints a blank line and **"Press Enter to close this window"**.
 Read it, press Enter, and the window closes. LocalCanvas then continues on its
 own:
 
@@ -341,9 +341,10 @@ and **Exit** ask first, rather than interrupting it silently:
 >
 > **[Restart]** [Cancel]
 
-(for Exit: **"...Exit LocalCanvas anyway?"**, with **[Exit]** and **[Cancel]**
-— Cancel is the default either way). Choosing Cancel leaves everything running
-and untouched. From the moment Exit is under way — even while a command it
+(for Exit: **"A generation may still be running. Exit LocalCanvas anyway?"**,
+with **[Exit]** and **[Cancel]** — Cancel is the default either way). Choosing
+Cancel leaves everything running and untouched. From the moment Exit is under
+way — even while a command it
 asked for earlier is still finishing — the tray tooltip already says
 `LocalCanvas — Exiting…`.
 

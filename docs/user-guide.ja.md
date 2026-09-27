@@ -198,7 +198,7 @@ ComfyUI 自身がワークフローを置く場所 —— が無いときにだ�
 
 ### セットアップが終わったとき
 
-ウィンドウは空行を出し、**「Press Enter to close this window.」**と表示します
+ウィンドウは空行を出し、**「Press Enter to close this window」**と表示します
 —— 読んで Enter を押すとウィンドウが閉じます。そのあと LocalCanvas は自分で
 続けます:
 
@@ -347,8 +347,10 @@ LocalCanvas は *Gateway down* の状態になります。自動での再起動�
 >
 > **[Restart]** [Cancel]
 
-（Exit の場合は **「...Exit LocalCanvas anyway?」**、ボタンは **[Exit]** と
-**[Cancel]** —— どちらも既定は Cancel です）。Cancel を選べば、何もかも
+（Exit の場合は
+**「A generation may still be running. Exit LocalCanvas anyway?」**、
+ボタンは **[Exit]** と **[Cancel]** —— どちらも既定は Cancel です）。
+Cancel を選べば、何もかも
 そのまま動き続けます。Exit が始まった瞬間から —— それより前に頼んだ処理が
 まだ終わっていなくても —— トレイのツールチップはもう
 `LocalCanvas — Exiting…` と表示します。

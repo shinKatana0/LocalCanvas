@@ -196,7 +196,7 @@ ComfyUI, адреса, имя этого компьютера для показ�
 
 ### Когда настройка закончена
 
-Окно печатает пустую строку и **«Press Enter to close this window.»** —
+Окно печатает пустую строку и **«Press Enter to close this window»** —
 прочитайте, нажмите Enter, окно закроется. Дальше LocalCanvas продолжает сам:
 
 - **Настройка прошла успешно** — он идёт дальше сам: запускает ComfyUI (или
@@ -345,8 +345,9 @@ LocalCanvas); **простой серый диск** (Stopping).
 >
 > **[Restart]** [Cancel]
 
-(для Exit: **«...Exit LocalCanvas anyway?»**, с **[Exit]** и **[Cancel]** —
-по умолчанию в обоих случаях Cancel). Если выбрать Cancel, всё останется
+(для Exit: **«A generation may still be running. Exit LocalCanvas anyway?»**,
+с **[Exit]** и **[Cancel]** — по умолчанию в обоих случаях Cancel). Если
+выбрать Cancel, всё останется
 работать без изменений. С того момента, как начался Exit — даже если ещё не
 закончился какой-то более ранний вызов, — подсказка в трее уже говорит
 `LocalCanvas — Exiting…`.
