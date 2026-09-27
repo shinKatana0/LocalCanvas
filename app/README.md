@@ -25,7 +25,7 @@ machine (`flutter doctor --android-licenses`), which is a one-off legal
 agreement for whoever owns it and is not something a script here will do on
 their behalf. The build commands, where the APK lands and what signing you get
 are in the user
-guide, [`docs/user-guide.md`](../docs/user-guide.md#5-installing-the-app). A release
+guide, [`docs/user-guide.md`](../docs/user-guide.md#5-connecting-your-phone). A release
 APK has been built here, universal and per-ABI, to verify that each one is named
 `LocalCanvas-<version>.apk`.
 
