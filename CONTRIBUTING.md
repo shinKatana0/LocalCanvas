@@ -79,6 +79,28 @@ with no `--ci-group` runs every group in one process; the suite's own notes put
 that at about an hour on the machine it was measured on, and a single group at up
 to about six minutes, so a group is what you want while you work.
 
+### The Windows launcher
+
+Requires the .NET 10 SDK.
+
+```powershell
+dotnet test launcher\LocalCanvas.Launcher.sln -c Release
+```
+
+The controller against a fake runtime, the health probe against real loopback
+listeners, the script runner against real PowerShell 7, two real launches, and
+end-to-end runs on the real scripts with their stub Gateway and ComfyUI. The
+end-to-end tests need PowerShell 7 and a Python 3.10–3.13 for the stubs;
+without them those tests are skipped and say what was not verified. Everything
+here uses ephemeral loopback ports, never 8188 or 7801. A change to
+`launcher/` also needs the PowerShell script groups that own the scripts it
+calls (`runtime-launch`, `runtime-stop`, `runtime-ownership`), since the
+launcher owns no process logic of its own — see `launcher/README.md`.
+
+`launcher/package.ps1` and `launcher/tools/generate-icons.ps1` are maintainer
+scripts, not a user-facing entry point: they carry the same PowerShell-7 gate
+as every script here, but they are never something an ordinary user runs.
+
 ## What CI runs
 
 `.github/workflows/ci.yml`, on `windows-latest`, for every push to `main` and
@@ -89,6 +111,7 @@ every pull request:
 | `gateway` | `pytest`, on Python **3.10** and **3.13** — the floor and the ceiling of `requires-python`. |
 | `app` | `flutter pub get`, `flutter analyze`, `flutter test` on the pinned Flutter version. |
 | `scripts` | `run_tests.py --ci-group <name>`, one job per group, thirteen in parallel. |
+| `launcher` | `dotnet test launcher\LocalCanvas.Launcher.sln -c Release` on .NET 10. |
 
 Nothing in CI talks to a real ComfyUI, a developer's network or a self-hosted
 machine, and nothing uses a secret. `LOCALCANVAS_INTEGRATION` is deliberately not
@@ -106,6 +129,14 @@ build that takes minutes does not stand in front of the test signal. It uses no
 secret either: there is no release signing in this project, so what it attaches
 is debug-signed, exactly like a release build on your own machine
 ([README.md](README.md) says what that means for installing one).
+
+A third, `.github/workflows/windows-package.yml` (**Windows package**),
+builds `LocalCanvas-<version>-windows-x64.zip` the same way
+`launcher\package.ps1` does for a maintainer, then verifies the zip it wrote by
+reading the archive back. It uses no secret, creates no tag or release, and
+states in its run summary that the exe inside is unsigned — that is a fact
+about this project's signing, not a claim about what any particular machine's
+policy will do with it.
 
 ## The contracts worth knowing before you change anything
 
@@ -163,6 +194,24 @@ Three more decide what the code may touch:
 7. **Nothing is built ahead of a need.** No abstraction for a hypothetical
    feature: a container for one setting, a credential store or a history nobody
    asked for waits until there is something real to put in it.
+
+### The launcher's own boundaries
+
+`launcher/` (`docs/runtime.md`, "Machine interface") is a second front end on
+the same runtime, not a second implementation of it:
+
+- **It owns no process logic.** Every lifecycle action is one of the
+  documented script calls (`start.ps1`, `stop.ps1`, `sync-workflows.ps1`,
+  `status.ps1`, each with `-Json`); the launcher itself never starts ComfyUI or
+  the Gateway, never stops a process, and never looks one up by name or port.
+- **Health is read-only HTTP, and identity-verified.** The only things the
+  launcher does itself beyond calling a script are `GET /api/v1/info` and
+  `GET /api/v1/workflows` on the Gateway, and `GET /system_stats` on ComfyUI.
+  The Gateway is healthy only when `/api/v1/info` answers as LocalCanvas with
+  the instance id the corresponding `start.ps1` call reported, the same rule
+  `docs/runtime.md` states for the scripts' own readiness checks.
+- **A launcher change needs launcher tests, and the script groups behind the
+  calls it makes** — see "The Windows launcher" above.
 
 ### Test safety
 

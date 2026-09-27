@@ -41,6 +41,13 @@ generation, no hosted QR or pairing service. The claims and the evidence for eac
 are in `docs/privacy-security.md`, including the two third-party Android
 components that ship with the app and what they add to its manifest.
 
+The Windows tray launcher (`LocalCanvas.exe`) adds nothing to that boundary.
+It makes no network call of its own beyond loopback health checks against the
+Gateway and ComfyUI it is watching, and it owns no process logic — every
+lifecycle action it takes is a call of the same scripts the command line uses
+(`CONTRIBUTING.md`, "The launcher's own boundaries"). Its log
+(`.runtime\launcher.log`) never leaves the machine.
+
 ## Reporting a problem
 
 Report security problems through **GitHub's private vulnerability reporting** on
