@@ -26,6 +26,9 @@ launcher/**/bin/
 launcher/**/obj/
 launcher/**/TestResults/
 
+# launcher/package.ps1's own staging folder and the zip it writes.
+launcher/dist/
+
 # Signing material. None ships; a keystore you create stays out of git.
 app/android/key.properties
 *.jks

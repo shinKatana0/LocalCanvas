@@ -69,6 +69,35 @@ jobs:
         working-directory: app
         run: flutter test
 
+  launcher:
+    name: launcher (.NET 10)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      # The end-to-end tests (launcher/README.md) run the real scripts against
+      # a stub gateway and a stub ComfyUI, written in Python; without one they
+      # are skipped and say so. The launcher's own build needs no Python.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Point the end-to-end tests at this Python
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = (python -c "import sys; print(sys.executable)").Trim()
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            throw "setup-python did not leave a usable interpreter at $python"
+          }
+          Write-Host "LOCALCANVAS_TEST_PYTHON=$python"
+          "LOCALCANVAS_TEST_PYTHON=$python" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Test the launcher
+        shell: pwsh
+        run: dotnet test launcher\LocalCanvas.Launcher.sln -c Release
+
   scripts:
     name: scripts (${{ matrix.group }})
     runs-on: windows-latest
