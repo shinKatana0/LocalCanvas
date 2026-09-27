@@ -28,7 +28,9 @@
 
     WHAT SHIPS, at the root of the zip's single LocalCanvas\ folder:
     LocalCanvas.exe; scripts\ without scripts\tests\; gateway\ without
-    gateway\tests\; comfy\ without any comfy\tests\; config\examples\;
+    gateway\tests\ and without gateway\conftest.py (pytest-only: it puts
+    gateway\ on sys.path for pytest, and nothing setup.ps1, start.ps1 or the
+    gateway package itself ever reads); comfy\ without any comfy\tests\; config\examples\;
     config\local\.gitkeep only; workflows\examples\; docs\; LICENSE,
     README.md, README.ru.md, README.ja.md, CHANGELOG.md, SECURITY.md,
     CONTRIBUTING.md. Nothing else -- in particular never app\, the launcher's
@@ -36,8 +38,12 @@
     under a build output, a cache or config\local\ besides the placeholder.
 
 .PARAMETER OutputDirectory
-    Where the zip (and the temporary staging folder) are written. Defaults to
-    launcher\dist\, which is gitignored; deleted and recreated on every run.
+    Where the zip is written. Defaults to launcher\dist\, which is gitignored.
+    This script only ever writes and deletes its own staging subfolder and
+    the one zip filename it produces, both by exact path; it refuses outright
+    to use a folder that already has files in it and that an earlier run of
+    this script did not create (see Assert-LcSafeOutputDirectory) -- it never
+    deletes -OutputDirectory itself or anything else already in it.
 
 .PARAMETER AllowDirty
     Skip the clean-tree check. FOR LOCAL TESTING ONLY: the files this script
@@ -95,6 +101,9 @@ function Test-LcPackageEntryAllowed {
     #>
     param([Parameter(Mandatory)][string]$Path)
     if ($script:RootAllowlist -contains $Path) { return $true }
+    # pytest-only: puts gateway\ on sys.path for pytest and is read by nothing
+    # setup.ps1, start.ps1 or the gateway package itself ever imports.
+    if ($Path -eq 'gateway/conftest.py') { return $false }
     if ($Path -eq $script:ConfigLocalPlaceholder) { return $true }
     if ($Path.StartsWith($script:ConfigExamplesPrefix, [System.StringComparison]::Ordinal)) { return $true }
     if ($Path.StartsWith($script:WorkflowExamplesPrefix, [System.StringComparison]::Ordinal)) { return $true }
@@ -128,6 +137,7 @@ function Test-LcPackageEntryForbidden {
         if ($normalized.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
     }
     if ($normalized -eq "$($script:ZipRootFolder)/.gitignore") { return $true }
+    if ($normalized -eq "$($script:ZipRootFolder)/gateway/conftest.py") { return $true }
     # The launcher's own C# sources: LocalCanvas.exe itself is allowed, and is
     # the only thing directly under the zip root beside the shipped folders.
     if ($normalized -match '(?i)^LocalCanvas/launcher/') { return $true }
@@ -151,6 +161,58 @@ function Test-LcPackageEntryForbidden {
 function Get-LcFileSha256 {
     param([Parameter(Mandatory)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+#: The marker this script leaves in an -OutputDirectory it created, so a later
+#: run (or a second run pointed at the same folder) can tell "an output folder
+#: this script made" apart from "some other folder that happens to be empty,
+#: or that a caller pointed -OutputDirectory at by mistake." See
+#: Assert-LcSafeOutputDirectory -- the only thing this script's own cleanup
+#: ever deletes is its own staging\ subfolder and the one zip filename it is
+#: about to write, both by exact literal path. It never deletes
+#: -OutputDirectory itself, and never wildcard-deletes anything in it.
+$script:OutputMarkerName = '.localcanvas-package-output'
+$script:OutputMarkerText = (
+    "This folder is launcher\package.ps1's own output folder.`n" +
+    "Everything in it is safe to delete; this file is only how the script " +
+    "tells its own folder apart from one it did not create.`n"
+)
+
+function Assert-LcSafeOutputDirectory {
+    <#
+        Claim $Path as this script's output folder, or refuse outright.
+
+        A folder this script did not make is left completely alone: no
+        Remove-Item of any kind runs against it or its contents. That is the
+        fix for the bug this function replaces -- the previous version ran
+        `Remove-Item -LiteralPath $OutputDirectory -Recurse -Force`, which
+        deletes whatever is already there. `-OutputDirectory .` inside an
+        unrelated, non-empty folder must find files it does not recognise and
+        stop, never wipe them.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) {
+        [void](New-Item -ItemType Directory -Path $Path -Force)
+        Set-Content -LiteralPath (Join-Path $Path $script:OutputMarkerName) `
+            -Value $script:OutputMarkerText -NoNewline
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw "Refused: $Path exists and is not a folder."
+    }
+    $marker = Join-Path $Path $script:OutputMarkerName
+    if (Test-Path -LiteralPath $marker -PathType Leaf) { return }
+    $existing = @(Get-ChildItem -LiteralPath $Path -Force)
+    if ($existing.Count -gt 0) {
+        throw ("Refused: $Path already has files in it, and this script did not create it " +
+            "(there is no $script:OutputMarkerName marker in it). This script only ever " +
+            "deletes its own staging folder and the one zip it is about to write -- never " +
+            "the output folder itself or anything else already in it. Pass -OutputDirectory " +
+            "an empty or new folder, or clear this one out yourself first. NOTHING has been " +
+            "deleted.")
+    }
+    # Empty, and not yet marked: claim it for this and later runs.
+    Set-Content -LiteralPath $marker -Value $script:OutputMarkerText -NoNewline
 }
 
 function Get-LcPackageVersion {
@@ -239,11 +301,15 @@ Write-Host "LocalCanvas.exe: $($exeInfo.Length) bytes, SHA-256 $exeSha256"
 
 # -- 2. stage -------------------------------------------------------------
 
-if (Test-Path -LiteralPath $OutputDirectory) {
-    Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
-}
-[void](New-Item -ItemType Directory -Path $OutputDirectory -Force)
+Assert-LcSafeOutputDirectory -Path $OutputDirectory
 $stagingRoot = Join-Path $OutputDirectory 'staging'
+if (Test-Path -LiteralPath $stagingRoot) {
+    # Assert-LcSafeOutputDirectory above already refused any -OutputDirectory
+    # this script does not own, so a staging\ folder found here is only ever
+    # this script's own leftover from an earlier run -- safe to remove by this
+    # exact, literal path, never a wildcard and never $OutputDirectory itself.
+    Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+}
 $packageRoot = Join-Path $stagingRoot $script:ZipRootFolder
 [void](New-Item -ItemType Directory -Path $packageRoot -Force)
 
@@ -328,6 +394,11 @@ if ($unexplained.Count -gt 0) {
 
 $fileEntryCount = @($entryNames | Where-Object { -not $_.EndsWith('/') }).Count
 Write-Host "Verified: $fileEntryCount file entries, all on the allowlist, no forbidden pattern present."
+
+# Success: remove the staging folder by its own exact, literal path (never
+# $OutputDirectory itself). It is an implementation detail of this run, not
+# something a user of -OutputDirectory needs to see or clean up themselves.
+Remove-Item -LiteralPath $stagingRoot -Recurse -Force
 Write-Host ''
 Write-Host '=== Summary ==='
 Write-Host "Version:        $version"

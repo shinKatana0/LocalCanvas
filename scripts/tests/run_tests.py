@@ -74,6 +74,10 @@ COMFY_MODEL_LIBRARY = COMFY / "lib" / "Models.ps1"
 COMFY_DOCTOR_LIBRARY = COMFY / "lib" / "Doctor.ps1"
 COMFY_MANIFEST = COMFY / "manifest.json"
 COMFY_EXAMPLE_MANIFEST = REPO / "config" / "examples" / "comfy-bootstrap.example.json"
+# The Windows launcher's own packaging tool -- a maintainer script, never a
+# user-facing entry point (see MAINTAINER_SCRIPTS below).
+LAUNCHER = REPO / "launcher"
+PACKAGE_SCRIPT = LAUNCHER / "package.ps1"
 
 POLL_INTERVAL = 0.05
 
@@ -15853,6 +15857,85 @@ class PowerShellVersionGateTests(unittest.TestCase):
         self.assertIn(str(marker), self.snapshot())
 
 
+class PackageOutputDirectorySafetyTests(unittest.TestCase):
+    """launcher\\package.ps1 never deletes an -OutputDirectory it did not make.
+
+    Regression coverage for a real bug: the script used to run
+    ``Remove-Item -LiteralPath $OutputDirectory -Recurse -Force`` before doing
+    anything else, which deletes whatever the caller already had in that
+    folder -- measured, ``-OutputDirectory .`` inside an ordinary populated
+    directory wiped it. Both shapes of that bug are proved fixed here by
+    dot-sourcing the REAL script (never a copy) and calling its own
+    Assert-LcSafeOutputDirectory directly, so no publish, no staging and no
+    zip has to run for this to be a meaningful check.
+    """
+
+    def setUp(self):
+        self.workspace = make_temporary_directory(prefix="lc package outdir ")
+        self.addCleanup(shutil.rmtree, self.workspace, True)
+
+    def run_assert(self, path):
+        """Dot-source package.ps1 and call Assert-LcSafeOutputDirectory -Path $path."""
+        script = (
+            "Set-StrictMode -Version Latest\n"
+            "$ErrorActionPreference = 'Stop'\n"
+            ". '{}'\n"
+            "try {{ Assert-LcSafeOutputDirectory -Path '{}'; Write-Output 'NO_THROW' }}\n"
+            "catch {{ Write-Output ('THROW: ' + $_.Exception.Message) }}\n"
+        ).format(PACKAGE_SCRIPT, path)
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=60, cwd=str(self.workspace),
+        )
+
+    def test_a_pre_populated_folder_it_did_not_create_is_refused_and_survives(self):
+        target = self.workspace / "outdir probe"
+        target.mkdir()
+        note = target / "my-notes.txt"
+        note.write_text("mine", encoding="utf-8")
+        nested = target / "keep me"
+        nested.mkdir()
+        (nested / "x.txt").write_text("also mine", encoding="utf-8")
+
+        result = self.run_assert(str(target))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("THROW:", result.stdout)
+        self.assertTrue(note.is_file(), "the caller's own file must survive a refusal")
+        self.assertTrue((nested / "x.txt").is_file(), "a nested file must survive too")
+        self.assertEqual("mine", note.read_text(encoding="utf-8"))
+
+    def test_dot_as_output_directory_inside_a_populated_folder_is_refused(self):
+        """The exact shape that was destructive: -OutputDirectory '.'.
+
+        The child process's own working directory IS self.workspace (see
+        run_assert), so '.' here names the same folder the marker file below
+        is planted in -- exactly the case the reviewer measured wiping a
+        real folder.
+        """
+        cwd_marker = self.workspace / "do-not-delete-me.txt"
+        cwd_marker.write_text("still here", encoding="utf-8")
+        result = self.run_assert(".")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("THROW:", result.stdout)
+        self.assertTrue(cwd_marker.is_file(), "the current directory's own files must survive")
+
+    def test_an_empty_or_new_folder_is_claimed_and_reused_without_error(self):
+        target = self.workspace / "fresh"
+        result = self.run_assert(str(target))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("NO_THROW", result.stdout)
+        marker = target / ".localcanvas-package-output"
+        self.assertTrue(marker.is_file(), "the script must mark a folder it created")
+
+        # A second call against the SAME folder -- now holding only the
+        # marker this script itself wrote -- must be accepted too: an
+        # idempotent second run, not a refusal.
+        result_again = self.run_assert(str(target))
+        self.assertEqual(0, result_again.returncode, result_again.stderr)
+        self.assertIn("NO_THROW", result_again.stdout)
+
+
 class TemporaryPathSpellingTests(unittest.TestCase):
     """T-0343: one directory, two spellings, and which one this suite uses.
 
@@ -26859,7 +26942,8 @@ CI_GROUPS = {
         "ConfigurationSeamCoverageTests", "DocumentationClaimTests",
         "SupportedShellReportTests", "PublicGitignoreTests", "PublicMarkdownLinkTests",
         "PublicTreeNamesNoCheckoutTests",
-        "PowerShellVersionGateTests", "TemporaryPathSpellingTests",
+        "PowerShellVersionGateTests", "PackageOutputDirectorySafetyTests",
+        "TemporaryPathSpellingTests",
         "InterpreterGuardTests", "SuiteDependencyGuardTests",
     ],
     "strict-lan-plan": [

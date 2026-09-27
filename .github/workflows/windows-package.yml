@@ -13,9 +13,12 @@
 # trigger, exactly the way apk.yml (the Android equivalent) does.
 #
 # SIGNING: none. This project holds no code-signing certificate, so the exe
-# inside the zip is unsigned; an unsigned exe downloaded from the internet is
-# what Windows SmartScreen's "Windows protected your PC" warning is for
-# (More info -> Run anyway), and that is expected, not a bug in this workflow.
+# inside the zip is unsigned. That is stated here as a fact and nothing more:
+# this workflow makes no claim about what any particular Windows machine does
+# with an unsigned download -- Smart App Control, SmartScreen and Windows
+# Defender each react to an unsigned executable according to machine-level
+# policy this workflow does not control and cannot observe. Signing is a
+# decision for the developer, not something this workflow can stand in for.
 #
 # Nothing here uses a secret, creates a keystore, makes a tag or a release, or
 # uploads anywhere outside this repository's own run artefacts. Like ci.yml
@@ -76,9 +79,9 @@ jobs:
           $lines = @(
             "### Windows package",
             "",
-            "**Unsigned.** This project holds no code-signing certificate. An unsigned",
-            "exe downloaded from the internet is what SmartScreen's ``Windows protected",
-            "your PC`` warning is for -- More info, then Run anyway.",
+            "**Unsigned.** This project holds no code-signing certificate, so the exe",
+            "inside this zip is unsigned. What Windows does with an unsigned download",
+            "depends on machine policy and is not something this workflow observes.",
             "",
             "| File | Bytes | SHA-256 |",
             "|---|---|---|",
