@@ -15870,6 +15870,16 @@ class PackageOutputDirectorySafetyTests(unittest.TestCase):
     zip has to run for this to be a meaningful check.
     """
 
+    #: The refusal's own wording (Assert-LcSafeOutputDirectory in
+    #: launcher\package.ps1). Asserted verbatim rather than a bare "it threw":
+    #: on Windows, ``Remove-Item -Recurse -Force .`` against a process's own
+    #: current directory throws too, for an unrelated reason (the directory
+    #: is in use) -- measured, that is genuinely what the OLD, destructive
+    #: code raised for the '.' case below. A test that only checked "threw"
+    #: would have passed against that bug for the wrong reason (T-0182); this
+    #: phrase is the one only the FIXED code's own refusal ever prints.
+    REFUSAL_PHRASE = "and this script did not create it"
+
     def setUp(self):
         self.workspace = make_temporary_directory(prefix="lc package outdir ")
         self.addCleanup(shutil.rmtree, self.workspace, True)
@@ -15900,7 +15910,7 @@ class PackageOutputDirectorySafetyTests(unittest.TestCase):
 
         result = self.run_assert(str(target))
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("THROW:", result.stdout)
+        self.assertIn(self.REFUSAL_PHRASE, result.stdout, result.stdout)
         self.assertTrue(note.is_file(), "the caller's own file must survive a refusal")
         self.assertTrue((nested / "x.txt").is_file(), "a nested file must survive too")
         self.assertEqual("mine", note.read_text(encoding="utf-8"))
@@ -15917,7 +15927,7 @@ class PackageOutputDirectorySafetyTests(unittest.TestCase):
         cwd_marker.write_text("still here", encoding="utf-8")
         result = self.run_assert(".")
         self.assertEqual(0, result.returncode, result.stderr)
-        self.assertIn("THROW:", result.stdout)
+        self.assertIn(self.REFUSAL_PHRASE, result.stdout, result.stdout)
         self.assertTrue(cwd_marker.is_file(), "the current directory's own files must survive")
 
     def test_an_empty_or_new_folder_is_claimed_and_reused_without_error(self):
