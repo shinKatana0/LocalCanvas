@@ -20,10 +20,11 @@ Launcher **0.2.0** (new) · Gateway **0.1.1 → 0.1.2** · App **0.1.5** (unchan
   with the pairing address, a QR code and the workflow count. The scripts
   themselves gained what the launcher needed to drive them unattended and
   tell one running instance from another: a `-Json` machine interface with
-  `-Component` on `start.ps1` and `stop.ps1`, a gateway instance identity
-  (`--instance-id`, echoed by `GET /api/v1/info`) and the port check that
-  refuses to start a second gateway onto one already in use — all exercised
-  by the command line too, which keeps every one of them.
+  `-Component` on `start.ps1` and `stop.ps1` (available on the command line
+  too, though an ordinary run needs neither), and a gateway instance identity
+  (`--instance-id`, echoed by `GET /api/v1/info`) with the port check that
+  refuses to start a second gateway onto one already in use — both of which
+  apply to every start, on either path.
 - **The command line is unaffected and unremoved.** Every script keeps
   working exactly as before; the launcher is a second front end for the same
   runtime, not a replacement for the first one. It is now the *Advanced*

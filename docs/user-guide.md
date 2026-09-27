@@ -30,7 +30,7 @@ On the PC that will run the generation:
 | **PowerShell 7 or newer** (`pwsh`) and **Python 3.10 – 3.13** | `LocalCanvas.exe` runs first-time setup itself, in a PowerShell window it opens on its own (section 2), and setup builds LocalCanvas's own `.venv/` from the Python it finds — you never open either tool yourself. Windows PowerShell 5.1 is not supported. `winget install --id Microsoft.PowerShell`, or <https://aka.ms/powershell>; Python from <https://www.python.org/downloads/>. |
 | **Google Chrome or Microsoft Edge** | Only to convert workflows saved with ComfyUI's **Save**. Workflows exported with **Export (API)** need no browser. |
 | An **Android phone** on the same Wi-Fi | The thing you will actually use. **Android 7.0 (API 24)** or newer — the minimum the release build declares. |
-| **git**, or **Flutter** and the **Android SDK** | Only for the command-line path (section 14), which clones this repository instead of downloading a zip, or to build the Android app yourself (section 5). |
+| **git**, or **Flutter** and the **Android SDK** | The command-line path (section 14) itself needs neither — the zip already has `scripts\` in it. `git` is only for cloning this repository instead of downloading the zip; **Flutter** and the **Android SDK** are only for building the Android app yourself (section 5). |
 
 On a machine with several Pythons installed, you do not have to pick one:
 setup selects an interpreter inside the supported range, and prints which one
@@ -212,7 +212,9 @@ type next — **"Next, start LocalCanvas:"** followed by
 **"To bring your ComfyUI workflows in:"** followed by
 `pwsh .\scripts\sync-workflows.ps1`. **None of that is for you: just press
 Enter.** Those two lines are for the command-line path (section 14); from the
-tray, LocalCanvas runs both of them for you the moment the window closes.
+tray, LocalCanvas starts itself for you the moment the window closes, and
+offers the workflow sync if there is one to offer (below), rather than
+running either for you unasked.
 
 The window then prints a blank line and **"Press Enter to close this
 window"**. Read it, press Enter, and the window closes. LocalCanvas then
@@ -859,12 +861,13 @@ not. Start ComfyUI on the PC, or check `comfy.host`/`comfy.port` in
 
 Everything above runs through `LocalCanvas.exe`. It touches the runtime by no
 other means than the calls described here: the same scripts, with `-Json`
-and, on `start.ps1` and `stop.ps1`, `-Component`. Those two flags, the
-gateway's own instance identity and the port check that refuses to start a
-second gateway onto one already in use are new in this release — added so
-the launcher could drive the scripts unattended and tell one running
-instance from another — and the command line uses every one of them just as
-much as the launcher does. Use this path when
+and, on `start.ps1` and `stop.ps1`, `-Component`. Those two flags are new in
+this release, added so the launcher could drive the scripts unattended —
+and they are available on the command line too, though an ordinary CLI run
+normally needs neither. The gateway's own instance identity and the port
+check that refuses to start a second gateway onto one already in use are
+new as well, and apply to every start regardless of path, so that one
+running instance can always be told from another. Use this path when
 Smart App Control blocks the exe (section 13), when you are on a PC without a
 desktop session to put a tray icon on, when you script LocalCanvas from
 something else, or just because you prefer it — it was the whole of LocalCanvas
