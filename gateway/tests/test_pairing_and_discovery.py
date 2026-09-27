@@ -1,8 +1,8 @@
 """QR pairing and mDNS advertisement (`docs/connection.md`).
 
 Both are deployment conveniences, and both are held to the contract's rules:
-the QR is fully local and carries no secret, and the advertisement carries the
-four TXT keys and nothing else.
+the QR this module renders is fully local and carries no secret, and the
+advertisement carries the four TXT keys and nothing else.
 
 The mDNS *registration* itself is not exercised here.  It needs a multicast
 network, which a test machine may not have and which `docs/connection.md`

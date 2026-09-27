@@ -13,8 +13,10 @@
         ▼
     GPU
 
-Three processes, one machine boundary. The Android app talks only to the
-gateway. The gateway talks only to ComfyUI and the local filesystem.
+Three processes, one machine boundary. The Android app's own code talks only
+to the gateway — see the third-party entries under **Data handling** in
+`docs/privacy-security.md` for what else ships with it. The gateway talks
+only to ComfyUI and the local filesystem.
 
 ## Boundaries
 

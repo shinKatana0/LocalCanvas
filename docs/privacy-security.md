@@ -6,9 +6,10 @@
 crash-reporting SaaS, cloud generation providers, remote relays, account
 requirements, or any cloud dependency for normal generation. This is a claim
 about LocalCanvas's own code, not about every third-party component that ships
-with it — see the Google ML Kit disclosure under **Data handling** below for
-the one place a shipped component's own network and data behaviour is outside
-that scope.
+with it — see the third-party entries under **Data handling** below (the
+Google ML Kit / Play-services barcode scanner, the photo-picker's
+Play-services fetch, and the rest) for where a shipped component's own
+network and data behaviour is outside that scope.
 
 Normal generation must work **with WAN unavailable**. That is a claim to be
 *proven by running the procedure below*, not one to be asserted from the
@@ -301,14 +302,16 @@ device on the network was tested.
   with the app, and this project's wording is careful enough that it should be
   written down rather than left for someone to find in a merged manifest.
 - **Google ML Kit ships with the app's QR/barcode scanning** (`mobile_scanner`
-  on Android). ML Kit's own dependency tree includes a Google/Firebase
-  `datatransport` component. It is not LocalCanvas's code, LocalCanvas does
-  not enable, configure or inspect what it does, and neither this document nor
-  any other in this project claims what, if anything, it sends over the
-  network — only that it is there, and that its network and data behaviour is
-  Google's, not LocalCanvas's. Disclosed here for the same reason as the entry
-  above: a component like this cannot be left off a list this project means to
-  be precise.
+  7.4.0 on Android, which declares `com.google.mlkit:barcode-scanning:17.3.0`
+  and `play-services-mlkit-barcode-scanning:18.3.1`). ML Kit's own dependency
+  tree also includes a Google/Firebase `datatransport` component. None of
+  this is LocalCanvas's code; LocalCanvas does not enable, configure or
+  inspect what any of it does, and neither this document nor any other in
+  this project claims what, if anything, it sends over the network — only
+  that it is there, and that its network and data behaviour is Google's, not
+  LocalCanvas's. Disclosed here for the same reason as the entry above, and
+  it is not the only Play-services-mediated component this app ships — see
+  the photo-picker entry above.
 - **The share sheet adds a `FileProvider` and a broadcast receiver** to the
   merged manifest under this app's id. That is how Android's native share works —
   a receiver is how the system tells the app which target the user picked — and
