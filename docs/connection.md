@@ -71,7 +71,7 @@ TXT metadata, small and useful only:
 | `version` | gateway version |
 | `api` | API version |
 
-No cloud discovery. No external registry. No Firebase. No account-based pairing.
+No cloud discovery. No external registry. No Firebase-based discovery. No account-based pairing.
 
 The app lists discovered gateways by display name. **A discovered service is a
 candidate, not a connection**: the identity handshake still runs before the
