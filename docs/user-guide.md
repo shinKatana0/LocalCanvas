@@ -57,8 +57,9 @@ Extract it anywhere on the PC — the folder you extract it to is where
 LocalCanvas lives from then on; nothing else on the machine is touched. Inside
 is one `LocalCanvas` folder holding `LocalCanvas.exe` beside `scripts\`,
 `config\` and everything else it needs. `LocalCanvas.exe` has to stay in that
-folder: moved out on its own, it refuses to run and names the folder it
-expects to find itself in.
+folder: moved out on its own, it refuses to run — a dialog titled
+**"LocalCanvas.exe must stay in the LocalCanvas folder."** names the
+`scripts\start.ps1` it looked for beside itself and could not find.
 
 The zip is self-contained: `LocalCanvas.exe` needs no .NET installed on the
 machine that runs it. PowerShell 7 and Python (above) are still needed —
@@ -134,7 +135,11 @@ running gives UNKNOWN rather than a clean bill of health.
 
 ## 2. First run
 
-Double-click `LocalCanvas.exe`, inside the extracted `LocalCanvas` folder.
+**Have ComfyUI running first**, unless you are about to tell setup to let
+LocalCanvas start it for you (question 1, below) — external mode never
+starts it, so first run needs it already up, and fails if it is not (see
+"When setup finishes"). Then double-click `LocalCanvas.exe`, inside the
+extracted `LocalCanvas` folder.
 
 **If setup has not run yet** — no `.venv\Scripts\python.exe`, or no
 `config\local\runtime.yaml` — a dialog appears:
@@ -150,6 +155,12 @@ Choose **Run setup**. It opens a visible PowerShell window running
 `scripts\setup.ps1` — the same script the command-line path runs (section 14),
 so what it asks is exactly the same whether you started it from the tray or
 typed it yourself.
+
+(Every custom button in these dialogs — **Run setup**, **Sync now**, **Later**,
+**Restart**, **Exit**, and headings and body text generally — is always
+English, whatever your Windows language. **Cancel** and **Close** are the two
+exceptions: they are Windows' own stock buttons, and follow Windows' own
+display language.)
 
 ### The two questions
 
@@ -195,13 +206,26 @@ is the reference for everything `runtime.yaml` can hold.
 
 ### When setup finishes
 
-The window prints a blank line and **"Press Enter to close this window"**.
-Read it, press Enter, and the window closes. LocalCanvas then continues on its
-own:
+Before the window closes it prints what it would tell a command-line user to
+type next — **"Next, start LocalCanvas:"** followed by
+`pwsh .\scripts\start.ps1`, and, if your workflows are already configured,
+**"To bring your ComfyUI workflows in:"** followed by
+`pwsh .\scripts\sync-workflows.ps1`. **None of that is for you: just press
+Enter.** Those two lines are for the command-line path (section 14); from the
+tray, LocalCanvas runs both of them for you the moment the window closes.
 
-- **Setup succeeded** — it goes straight on to start ComfyUI (or verify your
-  external one is answering), check your workflow folder, and start the
-  Gateway.
+The window then prints a blank line and **"Press Enter to close this
+window"**. Read it, press Enter, and the window closes. LocalCanvas then
+continues on its own:
+
+- **Setup succeeded, and ComfyUI answers** — it goes straight on to verify
+  ComfyUI (or start it, in managed mode), check your workflow folder, and
+  start the Gateway.
+- **Setup succeeded, but ComfyUI does not answer** (external mode only —
+  LocalCanvas never starts ComfyUI for you in that mode) — the tray shows
+  **Could not start**, a dialog titled **"LocalCanvas could not start."**
+  says **"ComfyUI is not reachable."**, and LocalCanvas closes. Start
+  ComfyUI and double-click `LocalCanvas.exe` again (section 13).
 - **Setup did not succeed** — the tray shows **Could not start**, and a dialog
   titled **"Setup did not finish."** names why (it could not be opened, it
   ended with an exit code, or it finished but LocalCanvas is still not set
@@ -247,6 +271,8 @@ The tray icon walks through the same states every start:
 | Green disc, check | Ready | `LocalCanvas — Ready` |
 | Amber/yellow triangle, "!" | Ready, but a workflow needs a look | `LocalCanvas — Ready (N workflows need a look)` |
 | Red disc, "x" | Gateway down, or startup failed | `LocalCanvas — Gateway down` / `LocalCanvas — Could not start` |
+| Amber disc, two circular arrows | Syncing (section 6) | `LocalCanvas — Syncing workflows…` |
+| Amber disc, open spinner arc (same as Starting) | Restarting the Gateway (section 4) | `LocalCanvas — Restarting the Gateway…` |
 | Plain grey disc | Stopping (Exit under way) | `LocalCanvas — Exiting…` |
 
 If the Gateway you already had running still answers correctly, it is reused
@@ -269,6 +295,12 @@ happens you get one notification:
 has the tray menu in full, including **Restart Gateway**.
 
 ## 4. The tray
+
+**Finding the icon.** On Windows 11, a new tray icon is commonly hidden
+under the small **^** arrow ("Show hidden icons") next to the clock the
+first time it appears — click that arrow if you do not see LocalCanvas. Or
+skip hunting for it: double-clicking `LocalCanvas.exe` again opens **Open
+status** just the same (section 3).
 
 Right-click the icon for the menu, always in this order:
 
@@ -322,9 +354,9 @@ A small window with more room than the menu gives:
 - **ComfyUI** status.
 - **Workflows**: how many are ready, and how many need a look.
 - A **problem** line, shown only when there is one.
-- **Log**, naming `.runtime\launcher.log`, with an **Open logs folder** button
-  beside it.
-- **Close** dismisses the window; LocalCanvas keeps running, and the next
+- **Log**, naming `.runtime\launcher.log`.
+- At the bottom, side by side: **Open logs folder** and **Close**. Close
+  dismisses the window; LocalCanvas keeps running, and the next
   **Open status** (or double-click) reopens the same window rather than
   building a new one.
 
@@ -472,14 +504,18 @@ your screen.
    LocalCanvas or leave it running — either way it looks at your folder before
    it starts, or you ask it to look with **Sync workflows** while it already
    is.
-3. A change on start is offered as the **"N workflow changes detected."**
-   dialog (section 2); at any other time, right-click the tray icon and choose
-   **Sync workflows** yourself. Either way the import runs, and, if any
-   definition was actually written, LocalCanvas restarts the Gateway on its
-   own afterwards so the phone sees the new workflow — the Gateway reads the
-   catalogue once, when it starts, and this is the one moment that matters.
-4. When it is done, a summary appears: **"Workflow sync completed."** /
-   `Updated: N · Needs review: N`.
+3. A change found while LocalCanvas is starting is offered as the **"N
+   workflow changes detected."** dialog (section 2) — accepting it imports
+   before the Gateway itself starts, so there is nothing to restart and no
+   summary dialog; the Gateway simply starts on the catalogue that import
+   just wrote.
+4. At any other time — LocalCanvas already running — right-click the tray
+   icon and choose **Sync workflows** yourself. This path shows a summary
+   when it is done — **"Workflow sync completed."** /
+   `Updated: N · Needs review: N` — and, if any definition was actually
+   written, restarts the Gateway on its own afterwards so the phone sees the
+   new workflow: the Gateway reads the catalogue once, when it starts, and
+   this is the one moment after startup that matters.
 5. If the app was already open and the workflow is not listed, tap
    **Refresh the list** (↻) at the top of **Choose a workflow**.
 
@@ -704,9 +740,11 @@ this guide gives no advice either way about doing so.
 
 **Windows blocked a script downloaded as part of the zip ("cannot be loaded",
 or a security warning naming the internet zone).** Files extracted from a zip
-downloaded from the internet carry a Mark of the Web. `LocalCanvas.exe` itself
-runs regardless; a script run directly from PowerShell may not. Clear it once,
-from inside the extracted `LocalCanvas` folder:
+downloaded from the internet carry a Mark of the Web. `LocalCanvas.exe` needs
+nothing done about it: every script it runs, it runs with
+`-ExecutionPolicy Bypass`, which is unaffected by the mark. A script you run
+yourself, directly from PowerShell, is not — clear the mark once, from inside
+the extracted `LocalCanvas` folder:
 
 ```powershell
 Get-ChildItem -Recurse | Unblock-File
@@ -764,10 +802,12 @@ measured, needs Administrator* and does not turn a clean run into a 2.
 <https://www.python.org/downloads/> and run setup again, or (command-line path,
 section 14) name an interpreter with `-PythonExe`. Nothing was created.
 
-**`start.ps1` says `ComfyUI is not reachable` and exits 4.** ComfyUI is not
-running, or `comfy.host`/`comfy.port` in `config/local/runtime.yaml` is wrong.
-In external mode LocalCanvas never starts ComfyUI for you: start it, then try
-again.
+**`start.ps1` says `ComfyUI is not reachable` and exits 4** (from the tray:
+**"LocalCanvas could not start."** / **"ComfyUI is not reachable."**, and the
+launcher closes). ComfyUI is not running, or `comfy.host`/`comfy.port` in
+`config/local/runtime.yaml` is wrong. In external mode LocalCanvas never
+starts ComfyUI for you: start it, then try again — double-click
+`LocalCanvas.exe` again, or run `start.ps1` again.
 
 **"That photo is in HEIC format, which LocalCanvas cannot use yet."** The phone
 could not decode the HEIC itself, so the original reached the gateway and was
@@ -817,9 +857,14 @@ not. Start ComfyUI on the PC, or check `comfy.host`/`comfy.port` in
 
 ## 14. Advanced command line
 
-Everything above runs through `LocalCanvas.exe`. Nothing about it is new
-underneath: it calls the same scripts described here, with `-Json`, and
-otherwise never touches the runtime by any other means. Use this path when
+Everything above runs through `LocalCanvas.exe`. It touches the runtime by no
+other means than the calls described here: the same scripts, with `-Json`
+and, on `start.ps1` and `stop.ps1`, `-Component`. Those two flags, the
+gateway's own instance identity and the port check that refuses to start a
+second gateway onto one already in use are new in this release — added so
+the launcher could drive the scripts unattended and tell one running
+instance from another — and the command line uses every one of them just as
+much as the launcher does. Use this path when
 Smart App Control blocks the exe (section 13), when you are on a PC without a
 desktop session to put a tray icon on, when you script LocalCanvas from
 something else, or just because you prefer it — it was the whole of LocalCanvas
@@ -997,7 +1042,10 @@ Either way it stops only processes LocalCanvas itself started. If it reused a
 ComfyUI you already had running, or you are in external mode, it leaves it
 alone and says so — the tray's ComfyUI line says `(external)` for exactly this
 reason (section 4). Closing the window you ran `start.ps1` in also stops the
-Gateway; closing the tray icon does not by itself, only **Exit** does.
+Gateway. The tray icon has no such window of its own to close, and closing
+**Open status** does not stop anything either — it only hides that window
+(section 4). Choosing **Exit** from the tray menu is the only way to stop
+what the tray started.
 
 **Signing out or shutting down Windows** with the tray running stops
 LocalCanvas the same way Exit does, automatically, and Windows is asked to
@@ -1042,5 +1090,3 @@ itself.
   complete worked examples: prompt-only, image-input and video-input.
 - [`connection.md`](connection.md), [`recovery.md`](recovery.md) — pairing,
   reconnect and job recovery, in full.
-- [`../launcher/README.md`](../launcher/README.md) — the tray launcher's own
-  design notes, for anyone building it from source.

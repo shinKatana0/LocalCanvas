@@ -204,11 +204,12 @@ the same runtime, not a second implementation of it:
   documented script calls (`start.ps1`, `stop.ps1`, `sync-workflows.ps1`,
   `status.ps1`, each with `-Json`); the launcher itself never starts ComfyUI or
   the Gateway, never stops a process, and never looks one up by name or port.
-- **Health is read-only HTTP, and identity-verified.** The one thing the
-  launcher does itself beyond calling a script is `GET /api/v1/info`: the
-  Gateway is healthy only when it answers as LocalCanvas with the instance id
-  the corresponding `start.ps1` call reported, the same rule `docs/runtime.md`
-  states for the scripts' own readiness checks.
+- **Health is read-only HTTP, and identity-verified.** The only things the
+  launcher does itself beyond calling a script are `GET /api/v1/info` and
+  `GET /api/v1/workflows` on the Gateway, and `GET /system_stats` on ComfyUI.
+  The Gateway is healthy only when `/api/v1/info` answers as LocalCanvas with
+  the instance id the corresponding `start.ps1` call reported, the same rule
+  `docs/runtime.md` states for the scripts' own readiness checks.
 - **A launcher change needs launcher tests, and the script groups behind the
   calls it makes** — see "The Windows launcher" above.
 

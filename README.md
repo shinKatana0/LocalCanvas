@@ -54,8 +54,11 @@ multi-user support; no Kubernetes; no iOS app and no web front end.
 - **Google Chrome or Microsoft Edge**, to convert workflows saved with ComfyUI's
   **Save**.
 - **An Android phone** (Android 7.0 or newer) on the same network.
-- Only for the command-line path, or to build the app yourself: **git**, and
-  Flutter and the Android SDK (see [Android app](#android-app)).
+- Only to build the Android app yourself: **Flutter** and the **Android SDK**
+  (see [Android app](#android-app)). The command-line path (below) needs no
+  **git** either — the zip already has `scripts\` in it; `git` is only for
+  cloning this repository instead of downloading a zip, or for building the
+  app.
 
 ## Download
 
@@ -65,22 +68,23 @@ From this repository's **Releases** page (once one is published):
   self-contained `LocalCanvas.exe`; the machine that runs it needs no .NET
   installed.
 - **`LocalCanvas-0.1.5-arm64-v8a.apk`** — the Android app. Unchanged in this
-  release; see [Android app](#android-app).
+  release, and it works with this Gateway; see [Android app](#android-app).
 
 ## Quick start
 
-1. Download `LocalCanvas-0.2.0-windows-x64.zip` and extract it — anywhere, on
-   the PC that runs ComfyUI.
-2. Double-click `LocalCanvas.exe`, inside the extracted `LocalCanvas` folder.
-3. First run asks to run setup — click **Run setup**. It opens a PowerShell
+1. Have ComfyUI running, on the PC you will run LocalCanvas on — unless you
+   plan to tell setup to let LocalCanvas start it for you (step 4).
+2. Download `LocalCanvas-0.2.0-windows-x64.zip` and extract it — anywhere, on
+   that same PC.
+3. Double-click `LocalCanvas.exe`, inside the extracted `LocalCanvas` folder.
+4. First run asks to run setup — click **Run setup**. It opens a PowerShell
    window and asks two short questions (do you start ComfyUI yourself, and
    where is your ComfyUI folder); LocalCanvas continues on its own once it has
-   finished.
-4. Have ComfyUI running first, unless you told setup to let LocalCanvas start
-   it. LocalCanvas finds your workflows and offers to sync them.
+   finished, finds your workflows and offers to sync them.
 5. Install the app on your phone — see [Android app](#android-app).
-6. Right-click the new tray icon and choose **Open status** for the address and
-   a pairing QR code.
+6. Right-click the new tray icon — on Windows 11 it may be under the hidden
+   icons **^** arrow — and choose **Open status** for the address and a
+   pairing QR code.
 7. Open the app, scan the QR code (or type the address), pick a workflow, type
    a prompt, press **Generate**.
 
@@ -104,8 +108,9 @@ Gateway goes down. **Right-click** it for Restart Gateway, Sync workflows, Open
 status and Exit; the [user guide](docs/user-guide.md#4-the-tray) has the full
 menu and every icon.
 
-Closing the tray icon (**Exit**) stops what LocalCanvas started; an external
-ComfyUI it did not start is left running.
+Choosing **Exit** from the tray menu stops what LocalCanvas started; an
+external ComfyUI it did not start is left running. If the icon shows a red
+×, right-click it and choose **Restart Gateway**.
 
 ## Adding or changing workflows
 
@@ -160,10 +165,10 @@ cannot reach the PC, the firewall is the usual reason.
 No telemetry, no analytics, no crash reporting, no accounts, no cloud
 generation. The app talks only to your gateway, and the gateway only to your
 ComfyUI. The Windows tray launcher adds nothing to that: the only network calls
-it makes on its own are loopback health checks against the Gateway and
-ComfyUI it started. This is a promise about LocalCanvas's own code, **not
-about third-party ComfyUI custom nodes**, which can do whatever their authors
-wrote — see [SECURITY.md](SECURITY.md).
+it makes on its own are loopback health checks against the Gateway and the
+ComfyUI it is watching — started by it or not. This is a promise about
+LocalCanvas's own code, **not about third-party ComfyUI custom nodes**, which
+can do whatever their authors wrote — see [SECURITY.md](SECURITY.md).
 
 ## Known limitations
 
@@ -185,6 +190,8 @@ Something not working? See
 
 - [User guide](docs/user-guide.md) — the full manual
   ([Русский](docs/user-guide.ru.md), [日本語](docs/user-guide.ja.md)).
+- [Command line](docs/user-guide.md#14-advanced-command-line) — everything
+  above without the tray, for scripting or a PC with no desktop session.
 - [CONTRIBUTING.md](CONTRIBUTING.md) — running the tests.
 - [SECURITY.md](SECURITY.md) — the security model and reporting a problem.
 - [CHANGELOG.md](CHANGELOG.md) — what changed.

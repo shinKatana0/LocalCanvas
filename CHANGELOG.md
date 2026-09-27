@@ -14,13 +14,16 @@ Launcher **0.2.0** (new) · Gateway **0.1.1 → 0.1.2** · App **0.1.5** (unchan
 - **A one-click Windows launcher.** Download
   `LocalCanvas-0.2.0-windows-x64.zip`, extract it, double-click
   `LocalCanvas.exe`. It runs first-time setup for you in a PowerShell window
-  it opens itself, then starts ComfyUI and the Gateway and settles into the
-  system tray: a status icon, a menu (Restart Gateway, Sync workflows, Open
-  status, Exit) and a status window with the pairing address, a QR code and
-  the workflow count. Nothing new was added to the runtime to make this
-  possible — the launcher only calls the same `start.ps1`, `stop.ps1`,
-  `sync-workflows.ps1` and `status.ps1` the command line always has, through
-  their `-Json` machine interface.
+  it opens itself, then verifies ComfyUI (starting it too, in managed mode)
+  and the Gateway, and settles into the system tray: a status icon, a menu
+  (Restart Gateway, Sync workflows, Open status, Exit) and a status window
+  with the pairing address, a QR code and the workflow count. The scripts
+  themselves gained what the launcher needed to drive them unattended and
+  tell one running instance from another: a `-Json` machine interface with
+  `-Component` on `start.ps1` and `stop.ps1`, a gateway instance identity
+  (`--instance-id`, echoed by `GET /api/v1/info`) and the port check that
+  refuses to start a second gateway onto one already in use — all exercised
+  by the command line too, which keeps every one of them.
 - **The command line is unaffected and unremoved.** Every script keeps
   working exactly as before; the launcher is a second front end for the same
   runtime, not a replacement for the first one. It is now the *Advanced*
