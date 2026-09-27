@@ -27,15 +27,17 @@
     a dirty tree is refused by default (see -AllowDirty).
 
     WHAT SHIPS, at the root of the zip's single LocalCanvas\ folder:
-    LocalCanvas.exe; scripts\ without scripts\tests\; gateway\ without
-    gateway\tests\ and without gateway\conftest.py (pytest-only: it puts
-    gateway\ on sys.path for pytest, and nothing setup.ps1, start.ps1 or the
-    gateway package itself ever reads); comfy\ without any comfy\tests\; config\examples\;
-    config\local\.gitkeep only; workflows\examples\; docs\; LICENSE,
-    README.md, README.ru.md, README.ja.md, CHANGELOG.md, SECURITY.md,
-    CONTRIBUTING.md. Nothing else -- in particular never app\, the launcher's
-    own sources, .github\, .gitignore, any directory named tests, or anything
-    under a build output, a cache or config\local\ besides the placeholder.
+    LocalCanvas.exe; scripts\ without scripts\tests\ and without
+    scripts\build-launcher.ps1 (a maintainer tool, like this script itself);
+    gateway\ without gateway\tests\ and without gateway\conftest.py
+    (pytest-only: it puts gateway\ on sys.path for pytest, and nothing
+    setup.ps1, start.ps1 or the gateway package itself ever reads); comfy\
+    without any comfy\tests\; config\examples\; config\local\.gitkeep only;
+    workflows\examples\; docs\; LICENSE, README.md, README.ru.md,
+    README.ja.md, CHANGELOG.md, SECURITY.md, CONTRIBUTING.md. Nothing else --
+    in particular never app\, the launcher's own sources, .github\,
+    .gitignore, any directory named tests, or anything under a build output,
+    a cache or config\local\ besides the placeholder.
 
 .PARAMETER OutputDirectory
     Where the zip is written. Defaults to launcher\dist\, which is gitignored.
@@ -104,6 +106,11 @@ function Test-LcPackageEntryAllowed {
     # pytest-only: puts gateway\ on sys.path for pytest and is read by nothing
     # setup.ps1, start.ps1 or the gateway package itself ever imports.
     if ($Path -eq 'gateway/conftest.py') { return $false }
+    # A maintainer tool, not something a user of the release zip runs -- the
+    # same reason launcher/package.ps1 itself never ships, but this one lives
+    # under scripts/ (see MAINTAINER_SCRIPTS, scripts\tests\run_tests.py) so
+    # the "no tests/ segment" rule below would otherwise let it through.
+    if ($Path -eq 'scripts/build-launcher.ps1') { return $false }
     if ($Path -eq $script:ConfigLocalPlaceholder) { return $true }
     if ($Path.StartsWith($script:ConfigExamplesPrefix, [System.StringComparison]::Ordinal)) { return $true }
     if ($Path.StartsWith($script:WorkflowExamplesPrefix, [System.StringComparison]::Ordinal)) { return $true }
@@ -138,6 +145,7 @@ function Test-LcPackageEntryForbidden {
     }
     if ($normalized -eq "$($script:ZipRootFolder)/.gitignore") { return $true }
     if ($normalized -eq "$($script:ZipRootFolder)/gateway/conftest.py") { return $true }
+    if ($normalized -eq "$($script:ZipRootFolder)/scripts/build-launcher.ps1") { return $true }
     # The launcher's own C# sources: LocalCanvas.exe itself is allowed, and is
     # the only thing directly under the zip root beside the shipped folders.
     if ($normalized -match '(?i)^LocalCanvas/launcher/') { return $true }
