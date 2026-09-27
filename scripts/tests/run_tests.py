@@ -34,7 +34,6 @@ import codecs
 import contextlib
 import hashlib
 import importlib.util
-import inspect
 import ipaddress
 import json
 import os
@@ -16640,41 +16639,78 @@ class BuildLauncherPipelineTests(unittest.TestCase):
         return self.output_root / "LocalCanvas"
 
     def test_the_real_output_root_is_never_referenced_here(self):
-        """R1's guard: a source lint, not a filesystem probe.
+        """R1's guard, widened past this one class to the WHOLE file.
 
         Deliberately NOT "plant a marker in the real artifacts\\dev and
         check it survives": a probe that reaches into that real folder at
         all is another script with the same class of risk R1 fixes, and on
         a developer's own machine (as opposed to a clean CI checkout) that
-        folder already holds real, live state. Reading this very class's
+        folder already holds real, live state. Reading this file's own
         source is a check that touches no real path whatsoever.
 
-        Checked PER METHOD, not as one string count over the whole class:
-        this very test's own source names BUILD_LAUNCHER_SCRIPT too (it has
-        to, to describe what it is checking), so a whole-class substring
-        count would see its own assertion line as a second offending call
-        site. Excluding this one test by name and checking every OTHER
-        method individually has no such blind spot.
+        A version of this guard scoped to only this one class could not see
+        a second class, a module-level helper, or a literal
+        SCRIPTS / "build-launcher.ps1" built fresh anywhere else in the
+        file -- all would bypass it, and the script's own default is still
+        the real folder. So this reads every function definition in the
+        WHOLE MODULE (ast.walk, not just this class's own methods).
+
+        The operative word in "must go through the one helper" is RUNS: a
+        function that merely NAMES the script -- BuildLauncherScriptLintTests
+        reading its text to lint it, or PowerShellVersionGateTests checking
+        that it is correctly listed in MAINTAINER_SCRIPTS -- never executes
+        anything and has no seam to bypass, so it is not an offender. What
+        marks a function as actually running something is calling
+        ``subprocess`` at all; every function that both names the script AND
+        calls subprocess must be build_launcher_arguments itself.
+
+        Checked by function, not as one string count over the whole file:
+        this very test's own source has to name what it is checking, so it
+        excludes itself by name rather than by a count that would see its
+        own line as a second offending call site.
         """
         this_test = "test_the_real_output_root_is_never_referenced_here"
         helper = "build_launcher_arguments"
+        text = (HERE / "run_tests.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(text)
+        # Split ONCE: ast.get_source_segment re-splits the whole file on
+        # every single call, which is fine for a one-off lookup but turns
+        # into minutes of wall clock time called once per function
+        # definition over a file this size (measured: ~1250 functions,
+        # ~500s). Slicing the same pre-split lines by each node's own
+        # lineno/end_lineno is the same text, computed once.
+        lines = text.splitlines(keepends=True)
+
+        def source_of(node):
+            start = node.lineno - 1
+            end = getattr(node, "end_lineno", node.lineno) - 1
+            return "".join(lines[start:end + 1])
+
         found_helper = False
-        for name, method in inspect.getmembers(BuildLauncherPipelineTests, predicate=inspect.isfunction):
-            if name == this_test:
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name == this_test:
                 continue
-            method_source = inspect.getsource(method)
-            mentions_script_path = "BUILD_LAUNCHER_SCRIPT" in method_source
-            if name == helper:
+            function_source = source_of(node)
+            mentions_script_path = (
+                "BUILD_LAUNCHER_SCRIPT" in function_source or
+                "build-launcher.ps1" in function_source.lower())
+            if not mentions_script_path:
+                continue
+            if node.name == helper:
                 found_helper = True
-                self.assertTrue(mentions_script_path,
-                                 "build_launcher_arguments must build the argv, naming the script")
-                self.assertIn("OutputRootPathForTests", method_source, method_source)
-            else:
-                self.assertFalse(
-                    mentions_script_path,
-                    "{} must call the real script only through {}, never by naming "
-                    "BUILD_LAUNCHER_SCRIPT itself:\n{}".format(name, helper, method_source))
+                self.assertIn("OutputRootPathForTests", function_source, function_source)
+                continue
+            if "subprocess." not in function_source:
+                # Names the script but never runs anything -- a text lint or
+                # a membership check, not a call site the seam applies to.
+                continue
+            offenders.append(node.name)
         self.assertTrue(found_helper, "the one call-building helper itself was not found")
+        self.assertEqual(
+            [], offenders,
+            "these name the script AND call subprocess, so they must go through {}, "
+            "never build their own argv: {}".format(helper, offenders))
 
     def snapshot(self, root):
         """Every file under ``root``, by relative path, with its own SHA-256.
@@ -16872,13 +16908,36 @@ class BuildLauncherPipelineTests(unittest.TestCase):
 
     def test_a_tampered_manifest_never_deletes_anything_outside_its_own_allowlist(self):
         """R2: the manifest is a file inside the user-writable output folder,
-        so nothing in it is trusted blindly for a deletion.
+        so nothing in it is trusted blindly for a deletion -- checked as a
+        CLASS of attack, not as a list of the shapes measured so far.
 
-        Four dangerous entries in one manifest:
-        an owner's real config, an owner's real .venv content, an unrelated
-        file this script never wrote, and a "..\\" escape outside the
-        destination folder entirely. All four must survive, and the rebuild
-        that reads the tampered manifest must still exit 0.
+        Direct hits (no disguise needed at all): an owner's real config, an
+        owner's real .venv content, an unrelated file this script never
+        wrote, and a "..\\" escape outside the destination folder entirely.
+
+        Disguised hits: the same four targets, each reached through a
+        "..\\" that starts inside an ALLOWED prefix (docs\\.., gateway\\..,
+        config\\examples\\.., scripts\\..) -- these must resolve to the
+        SAME protected files as the direct hits above and be refused for
+        the same reason, never let through because the raw text starts
+        with a directory name the allowlist happens to permit.
+
+        A junction: docs\\evil, planted with `mklink /J` (no admin rights
+        needed) inside a throwaway directory, pointing at ANOTHER throwaway
+        directory -- never a real location (AGENTS.md section H) -- with a
+        manifest entry naming a file inside it. GetFullPath does not
+        resolve or even notice a reparse point, so the reparse-point walk
+        is what has to catch this one; the string-level checks alone
+        would not.
+
+        A stale entry that no longer exists at all: it must be skipped
+        quietly, never crash the build or wedge every later rebuild the
+        same way (the exact side finding the previous round's own fix
+        missed).
+
+        And the positive control: a REAL, legitimately stale allowlisted
+        file (docs\\stale.md) must still be removed -- proving this test
+        does not pass merely because the fix now refuses everything.
         """
         first = self.run_build()
         self.assertEqual(0, first.returncode, first.stdout + first.stderr)
@@ -16890,6 +16949,9 @@ class BuildLauncherPipelineTests(unittest.TestCase):
         venv_marker = root / ".venv" / "Scripts" / "python.exe"
         venv_marker.parent.mkdir(parents=True, exist_ok=True)
         venv_marker.write_text("fake venv", encoding="utf-8")
+        runtime_marker = root / ".runtime" / "gateway.pid"
+        runtime_marker.parent.mkdir(parents=True, exist_ok=True)
+        runtime_marker.write_text("12345", encoding="utf-8")
         unrelated_marker = root / "my own notes.txt"
         unrelated_marker.write_text("mine", encoding="utf-8")
         # ".." from $destination (self.output_root/LocalCanvas) resolves to
@@ -16899,13 +16961,46 @@ class BuildLauncherPipelineTests(unittest.TestCase):
         outside_marker = self.output_root / "outside.txt"
         outside_marker.write_text("victim", encoding="utf-8")
 
+        # The legitimately stale file: a real allowlisted path, planted so
+        # it can actually be removed once the manifest says so.
+        legitimately_stale = root / "docs" / "stale.md"
+        legitimately_stale.parent.mkdir(parents=True, exist_ok=True)
+        legitimately_stale.write_text("stale", encoding="utf-8")
+
+        # The junction: docs\evil -> a throwaway directory that is NOT
+        # under $destination at all, holding a victim file of its own.
+        junction_target = make_temporary_directory(prefix="lc r2 junction target ")
+        self.addCleanup(shutil.rmtree, junction_target, True)
+        junction_victim = junction_target / "victim.txt"
+        junction_victim.write_text("junction victim", encoding="utf-8")
+        junction_path = root / "docs" / "evil"
+        junction_path.parent.mkdir(parents=True, exist_ok=True)
+        mklink = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction_path), str(junction_target)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        self.assertEqual(0, mklink.returncode, mklink.stdout + mklink.stderr)
+
         manifest_path = root / ".localcanvas-dev-build-manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["owned_files"] += [
+            # Direct hits.
             "config\\local\\runtime.yaml",
             ".venv\\Scripts\\python.exe",
             "my own notes.txt",
             "..\\outside.txt",
+            # Disguised hits: the same targets, through a ".." that starts
+            # inside an allowed prefix.
+            "docs\\..\\config\\local\\runtime.yaml",
+            "gateway\\..\\.venv\\Scripts\\python.exe",
+            "config\\examples\\..\\local\\runtime.yaml",
+            "scripts\\..\\.runtime\\gateway.pid",
+            "docs\\..\\my own notes.txt",
+            # The junction escape.
+            "docs\\evil\\victim.txt",
+            # A stale entry that simply no longer exists.
+            "docs\\this-file-does-not-exist-any-more.md",
+            # The positive control: a real, legitimately stale file.
+            "docs\\stale.md",
         ]
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -16914,8 +17009,14 @@ class BuildLauncherPipelineTests(unittest.TestCase):
 
         self.assertEqual("user config", config_marker.read_text(encoding="utf-8"))
         self.assertEqual("fake venv", venv_marker.read_text(encoding="utf-8"))
+        self.assertEqual("12345", runtime_marker.read_text(encoding="utf-8"))
         self.assertEqual("mine", unrelated_marker.read_text(encoding="utf-8"))
         self.assertEqual("victim", outside_marker.read_text(encoding="utf-8"))
+        self.assertEqual("junction victim", junction_victim.read_text(encoding="utf-8"))
+        self.assertFalse(
+            legitimately_stale.exists(),
+            "a REAL stale allowlisted file must still be removed -- the fix must not "
+            "simply refuse everything")
 
     def test_the_destination_exe_locked_refuses_before_any_swap(self):
         """M2: a rebuild while the dev launcher is running must never

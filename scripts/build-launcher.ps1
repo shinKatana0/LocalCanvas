@@ -135,54 +135,110 @@ function Test-LcStaleManifestEntryRemovable {
         run's own staging -- be deleted from $Destination?
 
         The manifest lives inside the user-writable output folder, so
-        nothing in it is trusted for a deletion just because it is there:
-        every entry is re-checked, independently, against three things.
-        ALL must hold:
+        nothing in it is trusted for a deletion just because it is there.
+        Checked as a CLASS of attack, not as a list of the shapes measured
+        so far -- an earlier version of this function ran its protected-
+        folder and allowlist checks against the RAW, un-normalised text of
+        $Relative, so an entry like "docs\..\config\local\runtime.yaml"
+        never matched the literal string "config/local" and sailed through
+        both checks while still resolving, on disk, to exactly the file
+        those checks exist to protect. Every step below works on what the
+        filesystem actually resolves $Relative to, never on the string as
+        written:
 
-          - it resolves ([System.IO.Path]::GetFullPath) strictly inside
-            $Destination -- rejects a "..\..\..." escape outright, string
-            containment alone is not enough;
-          - it is something this script could plausibly have written
-            itself: LocalCanvas.exe, build-info.json, or a path
-            Test-LcPackageEntryAllowed names;
-          - it is never anywhere under .venv\, .runtime\ or config\local\ --
-            except the one allowlisted placeholder, config\local\.gitkeep,
-            which this script does own and already ships.
+          1. THE RAW TEXT is rejected outright if it is rooted, contains a
+             literal ".." or "." path segment, or contains "~" or ":" --
+             the shapes that make a string say one thing and a resolved
+             path mean another (a rooted path, a parent-escape, a bare 8.3
+             short name, a drive letter or an NTFS alternate stream). This
+             is a fast pre-filter, not the authority: something can still
+             fail the checks below even after passing this one.
+          2. THE TARGET IS RESOLVED with GetFullPath, and must land
+             strictly inside $Destination -- string containment on the
+             UN-resolved text is not enough, exactly the gap above.
+          3. EVERY REMAINING CHECK -- protected folder, ownable/allowlisted
+             -- runs against $rel, the path GetRelativePath derives from
+             that RESOLVED target, case-insensitively, never against
+             $Relative as written. A disguised reference to a protected
+             file resolves to the same protected path either way, and is
+             refused either way.
+          4. NO REPARSE POINT (a junction or a symlink) may sit anywhere
+             between $Destination and the target, including the target
+             itself: GetFullPath does not resolve or even notice a reparse
+             point, so a junction planted inside an otherwise-allowed
+             directory can still make the real filesystem write outside
+             $Destination even once every string-level check above passes.
 
         Anything that fails any one of these is left alone; the caller
-        reports the skip rather than silently doing nothing.
+        reports the skip rather than silently doing nothing. A target that
+        passes every check but no longer exists on disk is also left
+        alone, silently -- see the caller, which only ever removes an
+        EXISTING file.
     #>
     param(
         [Parameter(Mandatory)][string]$Relative,
         [Parameter(Mandatory)][string]$Destination
     )
-    $target = Join-Path $Destination $Relative
-    $resolvedTarget = [System.IO.Path]::GetFullPath($target)
+
+    # 1. Raw-text pre-filter.
+    if ([string]::IsNullOrWhiteSpace($Relative)) { return $false }
+    if ([System.IO.Path]::IsPathRooted($Relative)) { return $false }
+    if ($Relative.Contains('~') -or $Relative.Contains(':')) { return $false }
+    $rawSegments = $Relative -split '[\\/]'
+    if ($rawSegments -contains '..' -or $rawSegments -contains '.') { return $false }
+
+    # 2. Resolve, and require strict containment inside $Destination.
     $resolvedDestination = [System.IO.Path]::GetFullPath($Destination)
+    $target = [System.IO.Path]::GetFullPath((Join-Path $resolvedDestination $Relative))
     $destinationPrefix = $resolvedDestination.TrimEnd(
         [System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) +
         [System.IO.Path]::DirectorySeparatorChar
-    if (-not $resolvedTarget.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+    if (-not $target.StartsWith($destinationPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         return $false
     }
 
-    $relativeSlash = $Relative -replace '\\', '/'
+    # 3. Every remaining check runs on $rel -- the RESOLVED relative path --
+    #    never on $Relative as written.
+    $rel = [System.IO.Path]::GetRelativePath($resolvedDestination, $target)
+    if ($rel -eq '.' -or $rel.StartsWith('..')) { return $false }
+    $relSlash = $rel -replace '\\', '/'
+
     $isProtected = (
-        $relativeSlash -eq '.venv' -or
-        $relativeSlash.StartsWith('.venv/', [System.StringComparison]::OrdinalIgnoreCase) -or
-        $relativeSlash -eq '.runtime' -or
-        $relativeSlash.StartsWith('.runtime/', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $relSlash -eq '.venv' -or
+        $relSlash.StartsWith('.venv/', [System.StringComparison]::OrdinalIgnoreCase) -or
+        $relSlash -eq '.runtime' -or
+        $relSlash.StartsWith('.runtime/', [System.StringComparison]::OrdinalIgnoreCase) -or
         (
-            ($relativeSlash -eq 'config/local' -or
-                $relativeSlash.StartsWith('config/local/', [System.StringComparison]::OrdinalIgnoreCase)) -and
-            $relativeSlash -ne $script:ConfigLocalPlaceholder
+            ($relSlash -eq 'config/local' -or
+                $relSlash.StartsWith('config/local/', [System.StringComparison]::OrdinalIgnoreCase)) -and
+            $relSlash -ne $script:ConfigLocalPlaceholder
         )
     )
     if ($isProtected) { return $false }
 
-    if ($relativeSlash -eq 'LocalCanvas.exe') { return $true }
-    if ($relativeSlash -eq $script:BuildInfoFileName) { return $true }
-    return (Test-LcPackageEntryAllowed -Path $relativeSlash)
+    $isOwnable = (
+        ($relSlash -eq 'LocalCanvas.exe') -or
+        ($relSlash -eq $script:BuildInfoFileName) -or
+        (Test-LcPackageEntryAllowed -Path $relSlash)
+    )
+    if (-not $isOwnable) { return $false }
+
+    # 4. No reparse point anywhere between $Destination and the target,
+    #    including the target itself. Walked from the resolved
+    #    destination, one segment of $rel at a time; stops as soon as a
+    #    component does not exist yet, since nothing further down it can
+    #    exist either.
+    $walked = $resolvedDestination
+    foreach ($segment in ($rel -split '[\\/]')) {
+        $walked = Join-Path $walked $segment
+        if (-not (Test-Path -LiteralPath $walked)) { break }
+        $item = Get-Item -LiteralPath $walked -Force
+        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+            return $false
+        }
+    }
+
+    return $true
 }
 
 $realLauncherProject = Join-Path $repoRoot 'launcher\LocalCanvas.Launcher'
@@ -323,6 +379,13 @@ if (Test-Path -LiteralPath $destinationExePath -PathType Leaf) {
             $destinationExePath, [System.IO.FileMode]::Open,
             [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
     } catch [System.IO.IOException] {
+        # This run's own staging folder is an implementation detail, not
+        # something a caller retrying the build needs to see or clean up
+        # themselves -- removed here too, by its own exact, literal path,
+        # the same as the successful-run cleanup below.
+        if (Test-Path -LiteralPath $stagingRoot) {
+            Remove-Item -LiteralPath $stagingRoot -Recurse -Force
+        }
         throw ("LocalCanvas.exe in $destination is in use - exit the running " +
             "LocalCanvas from its tray menu, then rebuild.")
     } finally {
@@ -366,9 +429,18 @@ foreach ($relative in $staleOwned) {
         Write-Warning "Skipped a manifest entry that is not safe to remove: $relative"
         continue
     }
-    $target = Join-Path $destination $relative
-    if (Test-Path -LiteralPath $target -PathType Leaf) {
-        Remove-Item -LiteralPath $target -Force
+    # The RESOLVED path, not a fresh Join-Path off the raw manifest text: a
+    # check-passing entry that has simply gone missing since the manifest
+    # was written (deleted by hand, or from an earlier, half-finished run)
+    # must be skipped quietly here too, never turned into a build failure
+    # or something that wedges every later rebuild the same way.
+    $target = [System.IO.Path]::GetFullPath((Join-Path $destination $relative))
+    if (-not (Test-Path -LiteralPath $target -PathType Leaf)) { continue }
+    try {
+        Remove-Item -LiteralPath $target -Force -ErrorAction Stop
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        # Gone between the check above and this line -- already what this
+        # build wants, not a failure.
     }
 }
 
