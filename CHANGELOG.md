@@ -62,6 +62,17 @@ not silently reused. `start.ps1` (and so the launcher) reports
   launcher's own tray uses. `api_version` does not move: these are additions
   an older app survives without noticing.
 
+### Privacy
+
+- **No LocalCanvas-owned analytics or usage telemetry in this release**, same
+  as before; the launcher adds none. The Android app is unchanged
+  (**0.1.5**) — a privacy review for this release found that its QR/barcode
+  scanning uses Google ML Kit, whose own dependency tree includes a
+  Google/Firebase `datatransport` component. It is not LocalCanvas's code;
+  LocalCanvas does not enable, configure or inspect it, and makes no claim
+  about what, if anything, it sends. Disclosed in
+  [SECURITY.md](SECURITY.md) and `docs/privacy-security.md`.
+
 ## v0.1.5 — first public release
 
 App **0.1.5** (build 6) · Gateway **0.1.1** · `api_version` **1** · tag `v0.1.5`
@@ -135,10 +146,10 @@ The first release. Everything below is new, because there was nothing before it.
 
 ### Privacy
 
-- No telemetry, no analytics, no crash reporting, no accounts, no cloud
-  generation, no hosted QR service. `docs/privacy-security.md` states each claim
-  and its evidence, including the two third-party Android components that ship
-  with the app.
+- No LocalCanvas-owned telemetry, analytics or crash reporting; no accounts;
+  no cloud generation; no hosted QR service. `docs/privacy-security.md` states
+  each claim and its evidence, including the third-party Android components
+  that ship with the app.
 
 ### Known limitations at v0.1
 

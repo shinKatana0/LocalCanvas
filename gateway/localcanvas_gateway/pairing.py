@@ -1,8 +1,10 @@
 """The QR pairing payload, and a QR rendered into a terminal.
 
-`docs/connection.md` §3: pairing is **fully local**.  No external QR service, no
-URL shortener, no hosted redirect, no cloud pairing -- the code is drawn from
-the bytes on this machine and read by a camera in the same room.
+`docs/connection.md` §3: pairing is **fully local on the gateway's side**.  No
+external QR service, no URL shortener, no hosted redirect, no cloud pairing --
+the code is drawn from the bytes on this machine.  What reads it on the phone
+is that app's own camera and scanning stack, not this module (see
+`docs/privacy-security.md` for what that involves).
 
 The payload is one deep link carrying connection information only::
 

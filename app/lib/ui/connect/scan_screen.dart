@@ -1,7 +1,11 @@
-/// QR pairing (`docs/connection.md` §3). Entirely local: the camera, the
-/// parser, and the handshake against the address the code carried. No external
-/// QR service, no shortener, no hosted redirect, nothing leaves the device but
-/// the request to the gateway itself.
+/// QR pairing (`docs/connection.md` §3). LocalCanvas's own code here sends
+/// nothing but the request to the gateway itself: the parser and the
+/// handshake against the address the code carried are local, and there is no
+/// external QR service, no shortener and no hosted redirect. The camera and
+/// barcode reading are Google ML Kit (via `mobile_scanner`); that dependency
+/// ships its own components with their own network and data behaviour,
+/// governed by Google and not by this code -- see `SECURITY.md` and
+/// `docs/privacy-security.md`.
 ///
 /// The screen is deliberately thin. Reading the payload is
 /// `parsePairingPayload`, verifying it is the connection controller, and both

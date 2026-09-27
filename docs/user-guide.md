@@ -450,7 +450,10 @@ all of them end in the same handshake before an endpoint is accepted:
    normal outcome and the app simply offers the other three.
 3. **Scan pairing code** — the QR from **Open status** in the tray (section 4),
    or from `start.ps1`'s own window on the command-line path (section 14).
-   Entirely local: no QR service, no shortener, no secret in the payload.
+   LocalCanvas's own side of this is local: no QR service, no shortener, no
+   secret in the payload. Reading the code with the camera is Google ML Kit,
+   which has its own network and data behaviour
+   ([`privacy-security.md`](privacy-security.md)).
 4. **Enter address** — always offered. `192.0.2.42`, `192.0.2.42:7801`
    and `http://192.0.2.42:7801` all work (with your PC's own address); the
    default port is 7801.
@@ -732,13 +735,15 @@ an older LocalCanvas gateway is running is refused, not silently reused:
 the fix — `pwsh .\scripts\stop.ps1 -Component Gateway` — then stop it once and
 start again.
 
-**Smart App Control blocks `LocalCanvas.exe` outright.** On a PC with Smart
-App Control on, Windows refuses to run an unsigned executable — there is no
-"Run anyway" dialog to click through. `LocalCanvas.exe` is unsigned. Use the
-command-line path instead (section 14): it runs through `pwsh`, which is
-Microsoft-signed and unaffected. Turning Smart App Control off is a Windows
-Security setting on that PC, not something LocalCanvas can do for you, and
-this guide gives no advice either way about doing so.
+**Some Windows security configurations may warn about or block unsigned
+executables, and Smart App Control blocks `LocalCanvas.exe` outright.** On a
+PC with Smart App Control on, Windows refuses to run an unsigned executable —
+there is no "Run anyway" dialog to click through. `LocalCanvas.exe` is
+unsigned. Use the command-line path instead (section 14): it runs through
+`pwsh`, which is Microsoft-signed and unaffected. LocalCanvas does not ask you
+to weaken Windows security to run it. Turning Smart App Control off is a
+Windows Security setting on that PC, not something LocalCanvas can do for
+you, and this guide gives no advice either way about doing so.
 
 **Windows blocked a script downloaded as part of the zip ("cannot be loaded",
 or a security warning naming the internet zone).** Files extracted from a zip
@@ -1068,9 +1073,11 @@ itself.
 ## 16. Known limitations
 
 - The PC side is **Windows only**.
-- `LocalCanvas.exe` is unsigned. A PC with Smart App Control on blocks it
-  outright, with no "Run anyway"; the command-line path (section 14) is
-  unaffected and is what the maintainer actually runs day to day.
+- `LocalCanvas.exe` is unsigned. Some Windows security configurations may
+  warn about or block unsigned executables; Smart App Control blocks it
+  outright, with no "Run anyway". The command-line path (section 14) is
+  unaffected and is what the maintainer actually runs day to day. LocalCanvas
+  does not ask you to weaken Windows security to run it.
 - The tray launcher itself has not been exercised end to end on a PC with
   Smart App Control off — see "What has been tested" in section 1.
 - The maintainer has tested pairing and generation by hand on one foldable

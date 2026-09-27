@@ -71,7 +71,7 @@ TXT metadata, small and useful only:
 | `version` | gateway version |
 | `api` | API version |
 
-No cloud discovery. No external registry. No Firebase. No account-based pairing.
+No cloud discovery. No external registry. No Firebase-based discovery. No account-based pairing.
 
 The app lists discovered gateways by display name. **A discovered service is a
 candidate, not a connection**: the identity handshake still runs before the
@@ -116,8 +116,10 @@ source manifest's — plugin manifests merge in. Check the built artifact.
 
 ## 3. Local QR pairing
 
-Fully local. **No external QR service, no URL shortener, no cloud pairing, no
-hosted redirect.**
+LocalCanvas's own code here is fully local. **No external QR service, no URL
+shortener, no cloud pairing, no hosted redirect.** Reading the code with the
+camera is Google ML Kit, which has its own network and data behaviour
+(`docs/privacy-security.md`).
 
 Payload — a LocalCanvas-specific URI carrying connection information only:
 

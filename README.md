@@ -70,6 +70,8 @@ From this repository's **Releases** page (once one is published):
 - **`LocalCanvas-0.1.5-arm64-v8a.apk`** — the Android app. Unchanged in this
   release, and it works with this Gateway; see [Android app](#android-app).
 
+`LocalCanvas.exe` is currently unsigned — see **Smart App Control** below.
+
 ## Quick start
 
 1. Have ComfyUI running, on the PC you will run LocalCanvas on — unless you
@@ -162,19 +164,26 @@ cannot reach the PC, the firewall is the usual reason.
 
 ## Privacy
 
-No telemetry, no analytics, no crash reporting, no accounts, no cloud
-generation. The app talks only to your gateway, and the gateway only to your
-ComfyUI. The Windows tray launcher adds nothing to that: the only network calls
-it makes on its own are loopback health checks against the Gateway and the
-ComfyUI it is watching — started by it or not. This is a promise about
-LocalCanvas's own code, **not about third-party ComfyUI custom nodes**, which
-can do whatever their authors wrote — see [SECURITY.md](SECURITY.md).
+LocalCanvas does not include its own analytics or usage telemetry, crash
+reporting, accounts, or cloud generation. The app's own code talks only to
+your gateway, and the gateway only to your ComfyUI. The Android app uses
+Google ML Kit for QR code scanning; that feature includes Google-provided
+components that may have their own network and data behaviour. The Windows
+tray launcher adds
+nothing to any of that: the only network calls it makes on its own are
+loopback health checks against the Gateway and the ComfyUI it is watching —
+started by it or not. This is a promise about LocalCanvas's own code, **not
+about third-party ComfyUI custom nodes or the Google components noted above**,
+which can do whatever their authors or providers wrote — see
+[SECURITY.md](SECURITY.md).
 
 ## Known limitations
 
 - The PC side is **Windows only**.
-- `LocalCanvas.exe` is unsigned; a PC with Smart App Control on blocks it and
-  needs the command-line path instead (see Quick start above).
+- `LocalCanvas.exe` is unsigned. Some Windows security configurations may warn
+  about or block unsigned executables — Smart App Control blocks it outright —
+  and the command-line path is the alternative (see Quick start above).
+  LocalCanvas does not ask you to weaken Windows security to run it.
 - The maintainer has tested pairing and generation by hand on one foldable
   phone over Wi-Fi against a real ComfyUI. Nothing automated covers that path.
 - Uploading a picture or clip has not yet been confirmed working from a phone.
