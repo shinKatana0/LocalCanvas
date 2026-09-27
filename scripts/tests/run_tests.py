@@ -78,7 +78,7 @@ COMFY_EXAMPLE_MANIFEST = REPO / "config" / "examples" / "comfy-bootstrap.example
 # user-facing entry point (see MAINTAINER_SCRIPTS below).
 LAUNCHER = REPO / "launcher"
 PACKAGE_SCRIPT = LAUNCHER / "package.ps1"
-# The local developer build (T-0380): a maintainer tool too, never something
+# The local developer build: a maintainer tool too, never something
 # a user runs -- see MAINTAINER_SCRIPTS below.
 BUILD_LAUNCHER_SCRIPT = SCRIPTS / "build-launcher.ps1"
 DEV_BUILD_OUTPUT_ROOT = REPO / "artifacts" / "dev"
@@ -16408,7 +16408,7 @@ if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line
 
 
 class BuildLauncherScriptLintTests(unittest.TestCase):
-    """Static checks over scripts\\build-launcher.ps1's own text (T-0380).
+    """Static checks over scripts\\build-launcher.ps1's own text.
 
     This is NOT a second launcher, and it must never grow into one: it shares
     launcher\\package.ps1's allowlist, version reader and publish step
@@ -16533,7 +16533,7 @@ class BuildLauncherScriptLintTests(unittest.TestCase):
 
 
 class BuildLauncherPipelineTests(unittest.TestCase):
-    """The REAL scripts\\build-launcher.ps1, run end to end (T-0380).
+    """The REAL scripts\\build-launcher.ps1, run end to end.
 
     Unlike launcher\\package.ps1's -OutputDirectory, this script's output
     location is fixed by the brief (artifacts\\dev\\LocalCanvas\\, always
