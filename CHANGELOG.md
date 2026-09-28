@@ -39,8 +39,8 @@ Launcher **0.2.0** (new) · Gateway **0.1.1 → 0.1.2** · App **0.1.5** (unchan
   running rather than interrupted, and is reported as such.
 - **Unsigned.** This project holds no code-signing certificate, so
   `LocalCanvas.exe` is unsigned. On a PC with Smart App Control turned on,
-  Windows blocks it outright, with no "Run anyway" — use the command-line
-  path there, or a PC where it is off. This is a stated limitation, not a
+  Windows may block it because it is unsigned, with no "Run anyway" — use
+  the command-line path there. This is a stated limitation, not a
   bug: see [README.md](README.md#known-limitations).
 
 ### Upgrading from v0.1.5

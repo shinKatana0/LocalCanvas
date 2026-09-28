@@ -55,10 +55,11 @@ multi-user support; no Kubernetes; no iOS app and no web front end.
   **Save**.
 - **An Android phone** (Android 7.0 or newer) on the same network.
 - Only to build the Android app yourself: **Flutter** and the **Android SDK**
-  (see [Android app](#android-app)). The command-line path (below) needs no
-  **git** either — the zip already has `scripts\` in it; `git` is only for
-  cloning this repository instead of downloading a zip, or for building the
-  app.
+  (see [Android app](#android-app)).
+- **git**, only for the
+  [command-line path](docs/user-guide.md#14-advanced-command-line): it runs
+  from a `git clone` of this repository, not from the downloaded zip. The
+  zip install — `LocalCanvas.exe` and its tray — needs no git at all.
 
 ## Download
 
@@ -95,9 +96,9 @@ walks through every step, the tray icon and menu, and what to do when
 something goes wrong.
 
 **Smart App Control.** `LocalCanvas.exe` is not code-signed. On a PC with
-Smart App Control (a Windows Security setting) turned on, Windows blocks it
-outright — there is no "Run anyway". The
-[command-line path](docs/user-guide.md#14-advanced-command-line) runs fine
+Smart App Control (a Windows Security setting) turned on, Windows may block
+it because it is unsigned; when it does, there is no "Run anyway". The
+[command-line path](docs/user-guide.md#14-advanced-command-line) still works
 under Smart App Control, because it runs through Microsoft-signed `pwsh`.
 
 ## Daily use
@@ -181,7 +182,7 @@ which can do whatever their authors or providers wrote — see
 
 - The PC side is **Windows only**.
 - `LocalCanvas.exe` is unsigned. Some Windows security configurations may warn
-  about or block unsigned executables — Smart App Control blocks it outright —
+  about or block unsigned executables — Smart App Control may block it —
   and the command-line path is the alternative (see Quick start above).
   LocalCanvas does not ask you to weaken Windows security to run it.
 - The maintainer has tested pairing and generation by hand on one foldable
