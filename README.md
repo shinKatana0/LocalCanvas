@@ -55,10 +55,11 @@ multi-user support; no Kubernetes; no iOS app and no web front end.
   **Save**.
 - **An Android phone** (Android 7.0 or newer) on the same network.
 - Only to build the Android app yourself: **Flutter** and the **Android SDK**
-  (see [Android app](#android-app)). The command-line path (below) needs no
-  **git** either — the zip already has `scripts\` in it; `git` is only for
-  cloning this repository instead of downloading a zip, or for building the
-  app.
+  (see [Android app](#android-app)).
+- **git**, only for the
+  [command-line path](docs/user-guide.md#14-advanced-command-line): it runs
+  from a `git clone` of this repository, not from the downloaded zip. The
+  zip install — `LocalCanvas.exe` and its tray — needs no git at all.
 
 ## Download
 

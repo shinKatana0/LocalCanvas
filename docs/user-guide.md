@@ -30,7 +30,8 @@ On the PC that will run the generation:
 | **PowerShell 7 or newer** (`pwsh`) and **Python 3.10 – 3.13** | `LocalCanvas.exe` runs first-time setup itself, in a PowerShell window it opens on its own (section 2), and setup builds LocalCanvas's own `.venv/` from the Python it finds — you never open either tool yourself. Windows PowerShell 5.1 is not supported. `winget install --id Microsoft.PowerShell`, or <https://aka.ms/powershell>; Python from <https://www.python.org/downloads/>. |
 | **Google Chrome or Microsoft Edge** | Only to convert workflows saved with ComfyUI's **Save**. Workflows exported with **Export (API)** need no browser. |
 | An **Android phone** on the same Wi-Fi | The thing you will actually use. **Android 7.0 (API 24)** or newer — the minimum the release build declares. |
-| **git**, or **Flutter** and the **Android SDK** | The command-line path (section 14) itself needs neither — the zip already has `scripts\` in it. `git` is only for cloning this repository instead of downloading the zip; **Flutter** and the **Android SDK** are only for building the Android app yourself (section 5). |
+| **git** | Needed for the command-line path (section 14): it runs from a `git clone` of this repository, not from the downloaded zip. The zip install — `LocalCanvas.exe` and its tray — needs no git at all. |
+| **Flutter** and the **Android SDK** | Only for building the Android app yourself (section 5). |
 
 On a machine with several Pythons installed, you do not have to pick one:
 setup selects an interpreter inside the supported range, and prints which one
@@ -80,8 +81,9 @@ pwsh .\comfy\setup.ps1 -Profile Minimal -DryRun
 pwsh .\comfy\setup.ps1 -Profile Minimal
 ```
 
-(Run from a PowerShell 7 window inside the extracted `LocalCanvas` folder, or
-from a clone if you are on the command-line path.) The dry run prints every
+(Run from a PowerShell 7 window, from a `git clone` of this repository —
+section 14. There is no tray equivalent: getting ComfyUI this way is
+command-line only, on both install paths.) The dry run prints every
 action it would take and writes nothing at all — not one directory. The real
 run clones ComfyUI at a pinned revision (about 7 MiB transferred, about 31 MiB
 on disk) and creates its `user/default/workflows` folder. Run it twice and the
@@ -231,8 +233,12 @@ continues on its own:
 - **Setup did not succeed** — the tray shows **Could not start**, and a dialog
   titled **"Setup did not finish."** names why (it could not be opened, it
   ended with an exit code, or it finished but LocalCanvas is still not set
-  up) and suggests running `scripts\setup.ps1` yourself to see what it needs.
-  Nothing was started.
+  up) and suggests starting LocalCanvas again to retry, or running
+  `scripts\setup.ps1` yourself in PowerShell 7 to see what it needs. Retrying
+  is the safe next step for a zip install; running the script by hand is the
+  command-line path (section 14), which is meant to be used from a
+  `git clone` — Windows can refuse a script run by hand from inside the
+  extracted zip folder. Nothing was started.
 
 Choosing **Cancel** on the first dialog instead starts nothing and LocalCanvas
 exits.
@@ -470,8 +476,9 @@ If no dialog appeared, or it was dismissed, everything on the PC still looks
 correct and the phone still cannot reach it: the QR code scans, the address is
 right, and the connection times out.
 
-`pwsh .\scripts\doctor.ps1` (section 14) reports the gateway's port and
-whether anything is listening on it. It reports the firewall rules themselves
+`pwsh .\scripts\doctor.ps1` (section 14, from a `git clone` — there is no
+tray equivalent) reports the gateway's port and whether anything is
+listening on it. It reports the firewall rules themselves
 only from an elevated prompt — run unelevated, which is the documented way, it
 says *not measured, needs Administrator* rather than guessing. Windows' own
 **Windows Defender Firewall with Advanced Security** is where an existing rule
@@ -711,8 +718,9 @@ LocalCanvas is Ready, the Gateway and ComfyUI are each probed every 5 seconds
 (2-second timeout); two failed Gateway probes in a row — about 14 seconds —
 are what turns the icon red. Nothing is restarted automatically; **Restart
 Gateway** is a deliberate action, always yours to take. The command line has
-the same information without the tray: `pwsh .\scripts\status.ps1` is
-read-only and reports what is up, what LocalCanvas owns, and the endpoint;
+the same information without the tray, from a `git clone` (section 14) —
+neither has a tray equivalent: `pwsh .\scripts\status.ps1` is read-only and
+reports what is up, what LocalCanvas owns, and the endpoint;
 `pwsh .\scripts\doctor.ps1` diagnoses the whole machine at once (section 13).
 
 **On the phone.** If Wi-Fi drops mid-generation, the app reconnects
@@ -726,8 +734,12 @@ is not the same as one that never ran.
 **The setup-required dialog's `[Cancel]`, or a setup that did not finish.**
 Nothing was started either way. Cancel leaves LocalCanvas exited; a setup that
 did not finish shows **"Setup did not finish."** naming why, and suggests
-`pwsh .\scripts\setup.ps1` from a PowerShell 7 window to see what it needs
-directly (section 2).
+starting LocalCanvas again to retry, or running `pwsh .\scripts\setup.ps1`
+from a PowerShell 7 window to see what it needs directly (section 2).
+Retrying from the tray is the safe first move for a zip install; running the
+script by hand is the command-line path (section 14), meant to be used from
+a `git clone` — Windows can refuse a script run by hand from inside the
+extracted zip folder.
 
 **A gateway left over from before v0.2.0 is still running.** Upgrading while
 an older LocalCanvas gateway is running is refused, not silently reused:
@@ -776,7 +788,8 @@ One more thing, if you call these scripts from a script of your own: the
 refusal is an error and not an exit code, so test `$?` rather than
 `$LASTEXITCODE`.
 
-**Run the doctor first.**
+**Run the doctor first.** This is the command-line path (section 14), from a
+`git clone` — there is no tray equivalent for it.
 
 ```powershell
 pwsh .\scripts\doctor.ps1
@@ -875,9 +888,7 @@ desktop session to put a tray icon on, when you script LocalCanvas from
 something else, or just because you prefer it — it was the whole of LocalCanvas
 before v0.2.0 and still is exactly as capable.
 
-**Getting the scripts.** The exe's own zip already has `scripts\` inside the
-extracted folder — you can run every command below from there. To work from a
-clone instead:
+**Getting the scripts.**
 
 ```powershell
 git clone https://github.com/shinKatana0/LocalCanvas.git LocalCanvas
@@ -885,7 +896,8 @@ cd LocalCanvas
 ```
 
 The command-line path is meant to be used from a `git clone` — files from a
-clone carry no Mark of the Web. The zip is for `LocalCanvas.exe`.
+clone carry no Mark of the Web. The zip is for `LocalCanvas.exe`, not for
+running scripts by hand.
 
 ### Install and start
 
@@ -1026,9 +1038,11 @@ LocalCanvas.
 
 ### Getting ComfyUI, and diagnosing the machine
 
-`comfy\setup.ps1` and `comfy\doctor.ps1` are the same commands whether you got
-here from the tray or the command line — section 1 has them in full, along
-with `scripts\doctor.ps1` (section 13).
+`comfy\setup.ps1`, `comfy\doctor.ps1` and `scripts\doctor.ps1` have no tray
+equivalent on either install path — the command is the same one whether your
+daily use is the tray or the command line, and it is always run from a
+`git clone` (section 1 has the first two in full, along with
+`scripts\doctor.ps1`, section 13).
 
 ## 15. Stopping, and an external ComfyUI
 
