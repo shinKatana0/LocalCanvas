@@ -476,9 +476,12 @@ If no dialog appeared, or it was dismissed, everything on the PC still looks
 correct and the phone still cannot reach it: the QR code scans, the address is
 right, and the connection times out.
 
-`pwsh .\scripts\doctor.ps1` (section 14, from a `git clone` — there is no
-tray equivalent) reports the gateway's port and whether anything is
-listening on it. It reports the firewall rules themselves
+`pwsh .\scripts\doctor.ps1` (section 14) reports the gateway's port and
+whether anything is listening on it — but it diagnoses the checkout it runs
+from, so this is only useful on the command-line install, run from the same
+`git clone` LocalCanvas is running from, never a fresh one. For a zip
+install, check the tray's status lines or **Open status** (section 4)
+instead. It reports the firewall rules themselves
 only from an elevated prompt — run unelevated, which is the documented way, it
 says *not measured, needs Administrator* rather than guessing. Windows' own
 **Windows Defender Firewall with Advanced Security** is where an existing rule
@@ -717,11 +720,13 @@ are the everyday way to see what LocalCanvas thinks is running. Once
 LocalCanvas is Ready, the Gateway and ComfyUI are each probed every 5 seconds
 (2-second timeout); two failed Gateway probes in a row — about 14 seconds —
 are what turns the icon red. Nothing is restarted automatically; **Restart
-Gateway** is a deliberate action, always yours to take. The command line has
-the same information without the tray, from a `git clone` (section 14) —
-neither has a tray equivalent: `pwsh .\scripts\status.ps1` is read-only and
-reports what is up, what LocalCanvas owns, and the endpoint;
-`pwsh .\scripts\doctor.ps1` diagnoses the whole machine at once (section 13).
+Gateway** is a deliberate action, always yours to take. On the command-line
+install, `pwsh .\scripts\status.ps1` gives the same read-only information
+without a tray to open — what is up, what LocalCanvas owns, and the endpoint
+— for the `git clone` it runs from; `pwsh .\scripts\doctor.ps1` diagnoses
+that same checkout at once (section 13). Both read the checkout they run
+from, so neither tells you anything about a zip install — for that, the
+tray's status lines and **Open status**, above, are the diagnostic.
 
 **On the phone.** If Wi-Fi drops mid-generation, the app reconnects
 automatically — 1 to 10 attempts, 3 by default, settable per device — and then
@@ -736,10 +741,11 @@ Nothing was started either way. Cancel leaves LocalCanvas exited; a setup that
 did not finish shows **"Setup did not finish."** naming why, and suggests
 starting LocalCanvas again to retry, or running `pwsh .\scripts\setup.ps1`
 from a PowerShell 7 window to see what it needs directly (section 2).
-Retrying from the tray is the safe first move for a zip install; running the
-script by hand is the command-line path (section 14), meant to be used from
-a `git clone` — Windows can refuse a script run by hand from inside the
-extracted zip folder.
+LocalCanvas has already exited by this point, so starting `LocalCanvas.exe`
+again is the safe first move for a zip install; running the script by hand
+is the command-line path (section 14), meant to be used from a `git clone`
+— Windows can refuse a script run by hand from inside the extracted zip
+folder.
 
 **A gateway left over from before v0.2.0 is still running.** Upgrading while
 an older LocalCanvas gateway is running is refused, not silently reused:
@@ -788,8 +794,11 @@ One more thing, if you call these scripts from a script of your own: the
 refusal is an error and not an exit code, so test `$?` rather than
 `$LASTEXITCODE`.
 
-**Run the doctor first.** This is the command-line path (section 14), from a
-`git clone` — there is no tray equivalent for it.
+**Run the doctor first.** This is the command-line install's own tool
+(section 14): it diagnoses the `git clone` it runs from, so run it from the
+same clone, not a fresh one. For a zip install, the tray's status lines,
+**Open status** and **Open logs folder** (section 4) are the diagnostic
+instead.
 
 ```powershell
 pwsh .\scripts\doctor.ps1
@@ -1038,11 +1047,12 @@ LocalCanvas.
 
 ### Getting ComfyUI, and diagnosing the machine
 
-`comfy\setup.ps1`, `comfy\doctor.ps1` and `scripts\doctor.ps1` have no tray
-equivalent on either install path — the command is the same one whether your
-daily use is the tray or the command line, and it is always run from a
-`git clone` (section 1 has the first two in full, along with
-`scripts\doctor.ps1`, section 13).
+`comfy\setup.ps1` and `comfy\doctor.ps1` are command-line only, on both
+install paths (section 1 has them in full). `scripts\doctor.ps1` (section
+13) is command-line only too, and — like `status.ps1` (section 12) —
+diagnoses the checkout it runs from: for a zip install, its tray equivalent
+is the tray's status lines, **Open status** and **Open logs folder**, never
+a fresh `git clone`.
 
 ## 15. Stopping, and an external ComfyUI
 
