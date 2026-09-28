@@ -78,6 +78,18 @@ COMFY_EXAMPLE_MANIFEST = REPO / "config" / "examples" / "comfy-bootstrap.example
 # user-facing entry point (see MAINTAINER_SCRIPTS below).
 LAUNCHER = REPO / "launcher"
 PACKAGE_SCRIPT = LAUNCHER / "package.ps1"
+# The local developer build: a maintainer tool too, never something
+# a user runs -- see MAINTAINER_SCRIPTS below.
+#
+# DELIBERATELY NO "DEV_BUILD_OUTPUT_ROOT = REPO / 'artifacts' / 'dev'"
+# CONSTANT HERE. That is the developer's real dogfood folder once they have
+# used the script for real -- their own .venv, config\local content and
+# .runtime live there -- and a suite that can name it in one place can
+# reach into it from any test. BuildLauncherPipelineTests below points every
+# invocation of BUILD_LAUNCHER_SCRIPT at its own temporary directory
+# instead, through -OutputRootPathForTests, and a lint in that class proves
+# it never had to reconstruct this path to do so.
+BUILD_LAUNCHER_SCRIPT = SCRIPTS / "build-launcher.ps1"
 
 POLL_INTERVAL = 0.05
 
@@ -788,6 +800,7 @@ HELPER_SCRIPTS = (
 MAINTAINER_SCRIPTS = (
     "launcher/package.ps1",
     "launcher/tools/generate-icons.ps1",
+    "scripts/build-launcher.ps1",
 )
 
 
@@ -1959,6 +1972,24 @@ def comfy_sources():
     directory boundary is a lint the next script walks around.
     """
     return powershell_sources_under(COMFY)
+
+
+def tracked_status(repo):
+    """`git status --porcelain` against ``repo``, or ``None`` if git failed.
+
+    Used by BuildLauncherPipelineTests to prove a dev build never modifies a
+    TRACKED file: an ignored path (artifacts/, .venv/, ...) never appears in
+    this output at all, so a build that only ever writes there leaves this
+    string identical before and after -- while a build that touched, say, a
+    tracked script by mistake would show up here immediately.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def tracked_powershell_sources():
@@ -14903,6 +14934,7 @@ PUBLIC_GITIGNORE_RULES = [
     "launcher/**/obj/",
     "launcher/**/TestResults/",
     "launcher/dist/",
+    "artifacts/",
     "app/android/key.properties",
     "*.jks",
     "*.keystore",
@@ -15529,6 +15561,14 @@ class PowerShellVersionGateTests(unittest.TestCase):
         walks are not quietly doing the work. Second: git's answer is compared
         with what the walks alone would find, and any tracked .ps1 outside
         scripts/ and comfy/ is shown to be in the first and not the second.
+
+        Most maintainer scripts live outside both directories (launcher/) and
+        are exactly what this half exists to catch; scripts/build-launcher.ps1
+        is a maintainer script that happens to live INSIDE scripts/, so the
+        walk over that directory finds it too -- correctly, since the walk is
+        a superset-by-union, not a guess at which files are maintainer tools.
+        The comparison below therefore expects only the MAINTAINER_SCRIPTS
+        entries the walk genuinely cannot see, not the whole list.
         """
         tracked = tracked_powershell_sources()
         self.assertIsNotNone(
@@ -15538,12 +15578,13 @@ class PowerShellVersionGateTests(unittest.TestCase):
             sorted(path.relative_to(REPO).as_posix() for path in tracked))
 
         walked = set(powershell_sources_under(SCRIPTS) + comfy_sources())
+        walked_relative = {path.relative_to(REPO).as_posix() for path in walked}
         outside = [path for path in tracked if path not in walked]
-        # None today -- every tracked .ps1 does live under scripts/ or comfy/ --
-        # so the claim that matters is the mechanism, asserted directly: a path
-        # at the root is in git's answer and not in the walks'.
+        # Every tracked .ps1 the walk cannot see is exactly the MAINTAINER_SCRIPTS
+        # entries that live outside scripts/ and comfy/ -- a path at the root
+        # (below) is one more example of the same thing.
         self.assertEqual(
-            sorted(MAINTAINER_SCRIPTS),
+            sorted(name for name in MAINTAINER_SCRIPTS if name not in walked_relative),
             sorted(path.relative_to(REPO).as_posix() for path in outside),
             "unclassified tracked .ps1 outside the walks")
         at_the_root = REPO / "a tool at the root.ps1"
@@ -16372,6 +16413,646 @@ if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line
         # And the real script, scanned by the same mechanism, still reports none.
         self.assertEqual([], self.remove_item_offenders(self.scan()))
         self.assertEqual([], self.member_delete_offenders(self.scan()))
+
+
+class BuildLauncherScriptLintTests(unittest.TestCase):
+    """Static checks over scripts\\build-launcher.ps1's own text.
+
+    This is NOT a second launcher, and it must never grow into one: it shares
+    launcher\\package.ps1's allowlist, version reader and publish step
+    (Invoke-LcLauncherPublish) rather than keeping its own copy, it publishes
+    the SAME win-x64 profile the release zip uses, and it never signs, and
+    never touches Smart App Control, Defender or any machine policy -- the
+    developer decisions this card must not reopen. Reading the file's own
+    text catches a regression the functional tests below cannot generalise
+    past: a mutation that adds a second, unused definition, or a call to one
+    of the forbidden tools placed somewhere a functional run never exercises.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = BUILD_LAUNCHER_SCRIPT.read_text(encoding="utf-8-sig")
+
+    def test_the_gate_is_the_very_first_line(self):
+        self.assertEqual(ENTRY_SCRIPT_REQUIRES, self.text.splitlines()[0])
+
+    def test_it_is_a_maintainer_script_not_an_entry_script(self):
+        # ENTRY_SCRIPT_BANNER ("LocalCanvas") is not a useful string to look
+        # for here: this script's whole subject is building LocalCanvas, so
+        # the word appears constantly in ordinary prose. What actually
+        # decides "maintainer, not entry" is the two lists themselves.
+        self.assertIn("scripts/build-launcher.ps1", MAINTAINER_SCRIPTS)
+        self.assertNotIn("scripts/build-launcher.ps1", ENTRY_SCRIPTS)
+
+    def test_it_reuses_package_ps1_and_defines_none_of_the_shared_functions_itself(self):
+        """No duplicated allowlist, version reader or publish step.
+
+        The brief is explicit that this script must reuse launcher\\package.ps1
+        rather than copy its logic. Checked two ways: the dot-source call is
+        present, and none of the four functions that call defines is
+        redefined here (a copy that silently drifted from the original is
+        exactly what "one allowlist, one publish step" is meant to prevent).
+        """
+        self.assertIn("launcher\\package.ps1", self.text)
+        self.assertRegex(self.text, r"(?m)^\s*\.\s*\(Join-Path \$repoRoot 'launcher\\package\.ps1'\)")
+        for name in (
+            "Test-LcPackageEntryAllowed", "Test-LcPackageEntryForbidden",
+            "Get-LcPackageVersion", "Invoke-LcLauncherPublish",
+        ):
+            with self.subTest(function=name):
+                self.assertNotRegex(
+                    self.text, r"(?im)^\s*function\s+{}\b".format(re.escape(name)),
+                    "{} must not be redefined here -- it is dot-sourced from package.ps1".format(name))
+
+    def test_it_never_overrides_the_release_publish_profile(self):
+        """The exact same win-x64, self-contained, single-file profile.
+
+        Invoke-LcLauncherPublish (package.ps1) is the only place
+        '-p:PublishProfile' is set; this script must never pass a competing
+        one, nor override RuntimeIdentifier or SelfContained itself -- doing
+        so would make the dev exe behave differently from the release one,
+        which the developer instruction forbids.
+        """
+        self.assertNotIn("PublishProfile=", self.text)
+        self.assertNotIn("-p:RuntimeIdentifier", self.text)
+        self.assertNotIn("-p:SelfContained", self.text)
+
+    def test_it_never_attempts_to_sign_anything(self):
+        lowered = self.text.lower()
+        for forbidden in ("signtool", "set-authenticodesignature", "authenticode"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+
+    def test_it_never_touches_smart_app_control_defender_or_any_machine_policy(self):
+        """Developer decisions this card must not reopen, held as a lint.
+
+        Read-only OBSERVATION of Smart App Control after a build is a
+        separate, manual step (see the brief) and is deliberately not part of
+        this script at all -- so none of these strings has any business
+        appearing here, not even in a comment.
+        """
+        lowered = self.text.lower()
+        forbidden_substrings = (
+            "set-mppreference", "set-executionpolicy", "set-netfirewallprofile",
+            "set-netfirewallrule", "disable-netfirewallrule", "set-cipolicy",
+            "verifiedandreputablepolicystate", "unblock-file",
+        )
+        for forbidden in forbidden_substrings:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+        self.assertNotIn("Smart App Control", self.text)
+
+    def test_it_never_kills_or_signals_a_process_and_run_is_a_plain_start(self):
+        """-Run starts a process and does nothing else to any process.
+
+        ProcessOwnershipLintTests already scans every tracked .ps1, including
+        this one, for a process addressed by anything but its own PID -- this
+        adds the narrower, script-specific claim the brief makes: -Run itself
+        is a plain Start-Process, with no -Wait and nothing that could stop or
+        signal an existing instance.
+        """
+        self.assertNotIn("Stop-Process", self.text)
+        self.assertNotIn("Get-Process", self.text)
+        self.assertIn("Start-Process", self.text)
+        # Real call sites only: "Start-Process -FilePath ..." -- not the
+        # comment-block prose above that also mentions the cmdlet by name
+        # ("a plain Start-Process, no -Wait"), which is not followed by a
+        # parameter and so never matches this stricter pattern.
+        call_sites = re.findall(r"(?m)^\s*Start-Process\s+-.*$", self.text)
+        self.assertGreater(len(call_sites), 0, "no real Start-Process call site found")
+        for line in call_sites:
+            with self.subTest(line=line):
+                self.assertNotIn("-Wait", line)
+
+    def test_it_names_no_developer_specific_absolute_path(self):
+        """Every path is built from $PSScriptRoot / $repoRoot, never hard-coded.
+
+        A drive-letter path (``C:\\...``) anywhere in the file would be a
+        specific machine's layout leaking into a script every clone runs --
+        exactly what AGENTS.md section C forbids. None is expected, in code
+        or in a comment.
+        """
+        hits = re.findall(r"[A-Za-z]:\\\\?[^\s'\"]*", self.text)
+        self.assertEqual([], hits)
+
+    def test_it_computes_the_repository_root_from_its_own_location(self):
+        self.assertIn("$PSScriptRoot", self.text)
+        self.assertRegex(self.text, r"\$repoRoot\s*=\s*\(Resolve-Path \(Join-Path \$PSScriptRoot '\.\.'\)\)")
+
+
+class BuildLauncherPipelineTests(unittest.TestCase):
+    """The REAL scripts\\build-launcher.ps1, run end to end.
+
+    Every test in this class points the script at its OWN throwaway
+    temporary directory via -OutputRootPathForTests, never at the real
+    repository's own artifacts\\dev -- that is the developer's actual
+    dogfood folder once they have used this script for real (their .venv,
+    config\\local content and .runtime), and a suite that builds, rebuilds
+    and cleans up there would build, rebuild and clean up THAT -- a real
+    regression this class once had: a planted .runtime\\x, a real
+    config\\local\\runtime.yaml and LocalCanvas.exe itself were all found
+    gone afterwards, once measured against a real dogfood folder.
+
+    test_the_real_output_root_is_never_referenced_here (below) is the
+    guard: every call this class makes to the real script goes through
+    build_launcher_arguments, the ONE place -OutputRootPathForTests is
+    supplied, and the guard proves that is the only place BUILD_LAUNCHER_
+    SCRIPT's own path appears in this class's source at all.
+
+    Also never a real self-contained publish unless a test says so
+    explicitly (most use -SkipPublish with a small stub exe, exactly as
+    PackageOutputDirectoryPipelineTests does for launcher\\package.ps1, so
+    that most of this class stays fast) -- and that stub now lives at this
+    script's OWN, dev-only publish directory (win-x64-dev), never
+    launcher\\package.ps1's own win-x64\\: the two scripts must never be
+    able to pick up each other's published exe under -SkipPublish.
+    """
+
+    STUB_BYTES = (
+        b"stub written only for BuildLauncherPipelineTests; "
+        b"not a real executable."
+    )
+    PUBLISH_DIRECTORY = LAUNCHER / "LocalCanvas.Launcher" / "bin" / "publish" / "win-x64-dev"
+    PUBLISHED_EXE = PUBLISH_DIRECTORY / "LocalCanvas.exe"
+
+    def setUp(self):
+        self.stub_written = False
+        self.created_directories = []
+        if not self.PUBLISHED_EXE.is_file():
+            directory = self.PUBLISH_DIRECTORY
+            while not directory.exists():
+                self.created_directories.append(directory)
+                directory = directory.parent
+            self.PUBLISH_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            self.PUBLISHED_EXE.write_bytes(self.STUB_BYTES)
+            self.stub_written = True
+            self.addCleanup(self.remove_stub)
+        # This test's own throwaway output root -- never the real
+        # repository's artifacts\dev. Removed unconditionally afterward:
+        # nothing a real user would ever have lives here, because nothing
+        # outside this class's own runs ever pointed the script at it.
+        self.output_root = make_temporary_directory(prefix="lc build launcher output ")
+        self.addCleanup(shutil.rmtree, self.output_root, True)
+
+    def remove_stub(self):
+        if self.stub_written and self.PUBLISHED_EXE.is_file():
+            try:
+                current_bytes = self.PUBLISHED_EXE.read_bytes()
+            except OSError:
+                current_bytes = None
+            # Only ever the exact bytes this setUp wrote -- a real publish (or
+            # another run of this same class) landing here in the meantime is
+            # left completely alone, real exe and all.
+            if current_bytes == self.STUB_BYTES:
+                self.PUBLISHED_EXE.unlink()
+        for directory in self.created_directories:
+            try:
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass
+
+    def build_launcher_arguments(self, *extra_args, skip_publish=True):
+        """Every argv this class ever passes to the real script, in ONE place.
+
+        -OutputRootPathForTests always names THIS test's own self.output_root,
+        never the real repository's own artifacts\\dev -- the single call
+        site test_the_real_output_root_is_never_referenced_here checks for.
+        """
+        arguments = [
+            PWSH, "-NoProfile", "-NonInteractive", "-File", str(BUILD_LAUNCHER_SCRIPT),
+            "-OutputRootPathForTests", str(self.output_root),
+        ]
+        if skip_publish:
+            arguments.append("-SkipPublish")
+        arguments.extend(extra_args)
+        return arguments
+
+    def run_build(self, *extra_args, timeout=120, skip_publish=True):
+        return subprocess.run(
+            self.build_launcher_arguments(*extra_args, skip_publish=skip_publish),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout, cwd=str(REPO),
+        )
+
+    def dev_output(self):
+        return self.output_root / "LocalCanvas"
+
+    def test_the_real_output_root_is_never_referenced_here(self):
+        """R1's guard, widened past this one class to the WHOLE file.
+
+        Deliberately NOT "plant a marker in the real artifacts\\dev and
+        check it survives": a probe that reaches into that real folder at
+        all is another script with the same class of risk R1 fixes, and on
+        a developer's own machine (as opposed to a clean CI checkout) that
+        folder already holds real, live state. Reading this file's own
+        source is a check that touches no real path whatsoever.
+
+        A version of this guard scoped to only this one class could not see
+        a second class, a module-level helper, or a literal
+        SCRIPTS / "build-launcher.ps1" built fresh anywhere else in the
+        file -- all would bypass it, and the script's own default is still
+        the real folder. So this reads every function definition in the
+        WHOLE MODULE (ast.walk, not just this class's own methods).
+
+        The operative word in "must go through the one helper" is RUNS: a
+        function that merely NAMES the script -- BuildLauncherScriptLintTests
+        reading its text to lint it, or PowerShellVersionGateTests checking
+        that it is correctly listed in MAINTAINER_SCRIPTS -- never executes
+        anything and has no seam to bypass, so it is not an offender. What
+        marks a function as actually running something is calling
+        ``subprocess`` at all; every function that both names the script AND
+        calls subprocess must be build_launcher_arguments itself.
+
+        Checked by function, not as one string count over the whole file:
+        this very test's own source has to name what it is checking, so it
+        excludes itself by name rather than by a count that would see its
+        own line as a second offending call site.
+        """
+        this_test = "test_the_real_output_root_is_never_referenced_here"
+        helper = "build_launcher_arguments"
+        text = (HERE / "run_tests.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(text)
+        # Split ONCE: ast.get_source_segment re-splits the whole file on
+        # every single call, which is fine for a one-off lookup but turns
+        # into minutes of wall clock time called once per function
+        # definition over a file this size (measured: ~1250 functions,
+        # ~500s). Slicing the same pre-split lines by each node's own
+        # lineno/end_lineno is the same text, computed once.
+        lines = text.splitlines(keepends=True)
+
+        def source_of(node):
+            start = node.lineno - 1
+            end = getattr(node, "end_lineno", node.lineno) - 1
+            return "".join(lines[start:end + 1])
+
+        found_helper = False
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name == this_test:
+                continue
+            function_source = source_of(node)
+            mentions_script_path = (
+                "BUILD_LAUNCHER_SCRIPT" in function_source or
+                "build-launcher.ps1" in function_source.lower())
+            if not mentions_script_path:
+                continue
+            if node.name == helper:
+                found_helper = True
+                self.assertIn("OutputRootPathForTests", function_source, function_source)
+                continue
+            if "subprocess." not in function_source:
+                # Names the script but never runs anything -- a text lint or
+                # a membership check, not a call site the seam applies to.
+                continue
+            offenders.append(node.name)
+        self.assertTrue(found_helper, "the one call-building helper itself was not found")
+        self.assertEqual(
+            [], offenders,
+            "these name the script AND call subprocess, so they must go through {}, "
+            "never build their own argv: {}".format(helper, offenders))
+
+    def snapshot(self, root):
+        """Every file under ``root``, by relative path, with its own SHA-256.
+
+        Used to prove a failed build left a PREVIOUS successful build's
+        output byte-for-byte alone -- a size-only check would miss a file
+        quietly rewritten with different, same-length content.
+        """
+        if not root.exists():
+            return {}
+        found = {}
+        for path in sorted(root.rglob("*")):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(root).as_posix()
+            found[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return found
+
+    def test_a_successful_build_produces_the_expected_layout(self):
+        """Tests 1-5: one command, a stable path, the exe, and no side effect
+        on any tracked file."""
+        before = tracked_status(REPO)
+        result = self.run_build()
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("LocalCanvas developer build ready:", output)
+        expected_relative_exe = str(Path("artifacts") / "dev" / "LocalCanvas" / "LocalCanvas.exe")
+        self.assertIn(expected_relative_exe, output)
+
+        exe = self.dev_output() / "LocalCanvas.exe"
+        self.assertTrue(exe.is_file(), output)
+        # Whatever the shared publish step produced -- the stub this class
+        # writes when nothing real is there, or a real exe another test (or
+        # an earlier `dotnet publish` in this worktree) already left behind
+        # -- the staged exe must be that SAME file, copied byte for byte,
+        # never re-encoded or replaced by anything else.
+        self.assertEqual(self.PUBLISHED_EXE.read_bytes(), exe.read_bytes(),
+                          "the staged exe must be the exact bytes the shared publish step wrote")
+
+        manifest_path = self.dev_output() / ".localcanvas-dev-build-manifest.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIn("LocalCanvas.exe", manifest["owned_files"])
+        self.assertIn("scripts\\setup.ps1", manifest["owned_files"])
+
+        build_info_path = self.dev_output() / "build-info.json"
+        self.assertTrue(build_info_path.is_file())
+        build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {"version", "source", "dirty", "configuration", "built_utc"}, set(build_info.keys()))
+        self.assertEqual("Release", build_info["configuration"])
+        self.assertRegex(build_info["source"], r"^[0-9a-f]{4,40}$")
+
+        after = tracked_status(REPO)
+        self.assertEqual(before, after, "a build must never modify a tracked file")
+
+    def test_the_output_path_is_stable_across_rebuilds(self):
+        """Test 2: the exe always lands at the same repo-relative path."""
+        expected_relative_exe = str(Path("artifacts") / "dev" / "LocalCanvas" / "LocalCanvas.exe")
+        for _ in range(2):
+            result = self.run_build()
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn(expected_relative_exe, result.stdout)
+            self.assertTrue((self.dev_output() / "LocalCanvas.exe").is_file())
+
+    def test_a_forced_publish_failure_leaves_the_previous_output_untouched(self):
+        """Test 6: a real compile failure, on a throwaway copy, never the
+        real launcher sources -- proves stale-build protection end to end."""
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        before = self.snapshot(self.dev_output())
+        self.assertIn("LocalCanvas.exe", before, "nothing to protect if the first build did not succeed")
+
+        broken_project = make_temporary_directory(prefix="lc build launcher broken ")
+        self.addCleanup(shutil.rmtree, broken_project, True)
+        (broken_project / "broken.csproj").write_text(
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+            "  <PropertyGroup>\n"
+            "    <OutputType>Exe</OutputType>\n"
+            "    <TargetFramework>net10.0</TargetFramework>\n"
+            "  </PropertyGroup>\n"
+            "</Project>\n",
+            encoding="utf-8")
+        (broken_project / "Program.cs").write_text(
+            "this is not valid C# @@@ -- a deliberate, forced compile failure\n",
+            encoding="utf-8")
+
+        result = subprocess.run(
+            self.build_launcher_arguments(
+                "-LauncherProjectPathForTests", str(broken_project), skip_publish=False),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=180, cwd=str(REPO))
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertNotIn("developer build ready", output)
+        after = self.snapshot(self.dev_output())
+        self.assertEqual(before, after,
+                          "a failed build must leave the previous output byte-for-byte untouched")
+
+    def test_run_starts_the_built_exe_through_the_seam_and_never_waits(self):
+        """Test 11: -Run, and single instance is entirely the exe's own business."""
+        workspace = make_temporary_directory(prefix="lc build launcher run ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        stub_target = workspace / "run target.cmd"
+        stub_target.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+        started_at = time.monotonic()
+        result = self.run_build("-Run", "-RunStartPathForTests", str(stub_target))
+        elapsed = time.monotonic() - started_at
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("Starting: " + str(stub_target), output)
+        # "No waiting": Start-Process without -Wait returns immediately, so
+        # the whole build+run finishes in a few seconds, never anywhere near
+        # how long a real launcher's own tray lifecycle would take to exit.
+        self.assertLess(elapsed, 30, "the run took long enough to suggest something waited")
+
+    def test_a_rebuild_preserves_owner_state_and_removes_only_stale_owned_files(self):
+        """Test 12: .venv, config\\local\\* and .runtime\\ survive a rebuild;
+        a file this script owned in an earlier build but no longer wants is
+        removed by its exact recorded path, nothing else."""
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+
+        root = self.dev_output()
+        venv_marker = root / ".venv" / "Scripts" / "python.exe"
+        venv_marker.parent.mkdir(parents=True, exist_ok=True)
+        venv_marker.write_text("fake venv", encoding="utf-8")
+        config_marker = root / "config" / "local" / "runtime.yaml"
+        config_marker.write_text("user config", encoding="utf-8")
+        # A path with a space in the owner's own configuration folder.
+        spaced_marker = root / "config" / "local" / "notes the user left.txt"
+        spaced_marker.write_text("owner note", encoding="utf-8")
+        runtime_marker = root / ".runtime" / "gateway.pid"
+        runtime_marker.parent.mkdir(parents=True, exist_ok=True)
+        runtime_marker.write_text("12345", encoding="utf-8")
+
+        manifest_path = root / ".localcanvas-dev-build-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        # A REALISTIC stale entry: something that could actually have been
+        # allowlisted and owned by an earlier build (docs\ is one of the
+        # allowed top-level directories) -- not an arbitrary flat filename,
+        # which R2's containment-and-allowlist check correctly no longer
+        # trusts for a deletion (see
+        # test_a_tampered_manifest_never_deletes_anything_outside_its_own_allowlist).
+        manifest["owned_files"].append("docs\\a-stale-owned-file.md")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        stale_file = root / "docs" / "a-stale-owned-file.md"
+        stale_file.parent.mkdir(parents=True, exist_ok=True)
+        stale_file.write_text("stale", encoding="utf-8")
+
+        second = self.run_build()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+
+        self.assertEqual("fake venv", venv_marker.read_text(encoding="utf-8"))
+        self.assertEqual("user config", config_marker.read_text(encoding="utf-8"))
+        self.assertEqual("owner note", spaced_marker.read_text(encoding="utf-8"))
+        self.assertEqual("12345", runtime_marker.read_text(encoding="utf-8"))
+        self.assertFalse(
+            stale_file.exists(),
+            "a file this script owned in an earlier build must be removed once no longer wanted")
+
+    def test_a_launcher_project_at_a_path_with_a_space_publishes_and_builds(self):
+        """Test 7: a real dotnet publish, at a path with a space in it.
+
+        The one test in this class that does not use -SkipPublish: it copies
+        the real launcher project (never edits it) into a throwaway directory
+        whose own path contains a space, and publishes THAT copy through the
+        same -LauncherProjectPathForTests seam the forced-failure test above
+        uses, proving the whole publish-and-verify path handles a space
+        correctly rather than only the parts -SkipPublish exercises.
+        """
+        workspace = make_temporary_directory(prefix="lc build launcher space ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        spaced_project = workspace / "dev build project"
+        shutil.copytree(
+            LAUNCHER / "LocalCanvas.Launcher", spaced_project,
+            ignore=shutil.ignore_patterns("bin", "obj", "TestResults"))
+        shutil.copy2(LAUNCHER / "Directory.Build.props", spaced_project / "Directory.Build.props")
+
+        result = subprocess.run(
+            self.build_launcher_arguments(
+                "-LauncherProjectPathForTests", str(spaced_project), skip_publish=False),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=180, cwd=str(REPO))
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("LocalCanvas developer build ready:", output)
+        published_exe = spaced_project / "bin" / "publish" / "win-x64-dev" / "LocalCanvas.exe"
+        self.assertTrue(published_exe.is_file(), output)
+        self.assertGreater(published_exe.stat().st_size, 1_000_000, "not a real self-contained publish")
+        dest_exe = self.dev_output() / "LocalCanvas.exe"
+        self.assertTrue(dest_exe.is_file())
+        self.assertEqual(published_exe.read_bytes(), dest_exe.read_bytes())
+
+    def test_a_tampered_manifest_never_deletes_anything_outside_its_own_allowlist(self):
+        """R2: the manifest is a file inside the user-writable output folder,
+        so nothing in it is trusted blindly for a deletion -- checked as a
+        CLASS of attack, not as a list of the shapes measured so far.
+
+        Direct hits (no disguise needed at all): an owner's real config, an
+        owner's real .venv content, an unrelated file this script never
+        wrote, and a "..\\" escape outside the destination folder entirely.
+
+        Disguised hits: the same four targets, each reached through a
+        "..\\" that starts inside an ALLOWED prefix (docs\\.., gateway\\..,
+        config\\examples\\.., scripts\\..) -- these must resolve to the
+        SAME protected files as the direct hits above and be refused for
+        the same reason, never let through because the raw text starts
+        with a directory name the allowlist happens to permit.
+
+        A junction: docs\\evil, planted with `mklink /J` (no admin rights
+        needed) inside a throwaway directory, pointing at ANOTHER throwaway
+        directory -- never a real location (AGENTS.md section H) -- with a
+        manifest entry naming a file inside it. GetFullPath does not
+        resolve or even notice a reparse point, so the reparse-point walk
+        is what has to catch this one; the string-level checks alone
+        would not.
+
+        A stale entry that no longer exists at all: it must be skipped
+        quietly, never crash the build or wedge every later rebuild the
+        same way (the exact side finding the previous round's own fix
+        missed).
+
+        And the positive control: a REAL, legitimately stale allowlisted
+        file (docs\\stale.md) must still be removed -- proving this test
+        does not pass merely because the fix now refuses everything.
+        """
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+
+        root = self.dev_output()
+        config_marker = root / "config" / "local" / "runtime.yaml"
+        config_marker.parent.mkdir(parents=True, exist_ok=True)
+        config_marker.write_text("user config", encoding="utf-8")
+        venv_marker = root / ".venv" / "Scripts" / "python.exe"
+        venv_marker.parent.mkdir(parents=True, exist_ok=True)
+        venv_marker.write_text("fake venv", encoding="utf-8")
+        runtime_marker = root / ".runtime" / "gateway.pid"
+        runtime_marker.parent.mkdir(parents=True, exist_ok=True)
+        runtime_marker.write_text("12345", encoding="utf-8")
+        unrelated_marker = root / "my own notes.txt"
+        unrelated_marker.write_text("mine", encoding="utf-8")
+        # ".." from $destination (self.output_root/LocalCanvas) resolves to
+        # self.output_root itself -- still inside this test's OWN temporary
+        # workspace, never touching anything outside it, but genuinely
+        # outside the LocalCanvas destination folder the manifest is for.
+        outside_marker = self.output_root / "outside.txt"
+        outside_marker.write_text("victim", encoding="utf-8")
+
+        # The legitimately stale file: a real allowlisted path, planted so
+        # it can actually be removed once the manifest says so.
+        legitimately_stale = root / "docs" / "stale.md"
+        legitimately_stale.parent.mkdir(parents=True, exist_ok=True)
+        legitimately_stale.write_text("stale", encoding="utf-8")
+
+        # The junction: docs\evil -> a throwaway directory that is NOT
+        # under $destination at all, holding a victim file of its own.
+        junction_target = make_temporary_directory(prefix="lc r2 junction target ")
+        self.addCleanup(shutil.rmtree, junction_target, True)
+        junction_victim = junction_target / "victim.txt"
+        junction_victim.write_text("junction victim", encoding="utf-8")
+        junction_path = root / "docs" / "evil"
+        junction_path.parent.mkdir(parents=True, exist_ok=True)
+        mklink = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction_path), str(junction_target)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        self.assertEqual(0, mklink.returncode, mklink.stdout + mklink.stderr)
+
+        manifest_path = root / ".localcanvas-dev-build-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["owned_files"] += [
+            # Direct hits.
+            "config\\local\\runtime.yaml",
+            ".venv\\Scripts\\python.exe",
+            "my own notes.txt",
+            "..\\outside.txt",
+            # Disguised hits: the same targets, through a ".." that starts
+            # inside an allowed prefix.
+            "docs\\..\\config\\local\\runtime.yaml",
+            "gateway\\..\\.venv\\Scripts\\python.exe",
+            "config\\examples\\..\\local\\runtime.yaml",
+            "scripts\\..\\.runtime\\gateway.pid",
+            "docs\\..\\my own notes.txt",
+            # The junction escape.
+            "docs\\evil\\victim.txt",
+            # A stale entry that simply no longer exists.
+            "docs\\this-file-does-not-exist-any-more.md",
+            # The positive control: a real, legitimately stale file.
+            "docs\\stale.md",
+        ]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        second = self.run_build()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+
+        self.assertEqual("user config", config_marker.read_text(encoding="utf-8"))
+        self.assertEqual("fake venv", venv_marker.read_text(encoding="utf-8"))
+        self.assertEqual("12345", runtime_marker.read_text(encoding="utf-8"))
+        self.assertEqual("mine", unrelated_marker.read_text(encoding="utf-8"))
+        self.assertEqual("victim", outside_marker.read_text(encoding="utf-8"))
+        self.assertEqual("junction victim", junction_victim.read_text(encoding="utf-8"))
+        self.assertFalse(
+            legitimately_stale.exists(),
+            "a REAL stale allowlisted file must still be removed -- the fix must not "
+            "simply refuse everything")
+
+    def test_the_destination_exe_locked_refuses_before_any_swap(self):
+        """M2: a rebuild while the dev launcher is running must never
+        half-swap the destination. Exits non-zero with a clear message,
+        no "ready" line, and the previously-built exe is left byte-identical."""
+        import msvcrt
+
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        exe_path = self.dev_output() / "LocalCanvas.exe"
+        before = self.snapshot(self.dev_output())
+
+        handle = open(exe_path, "r+b")
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            result = self.run_build()
+        finally:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            handle.close()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertIn("is in use", output, output)
+        self.assertIn("tray menu", output, output)
+        self.assertNotIn("developer build ready", output)
+        after = self.snapshot(self.dev_output())
+        self.assertEqual(before, after,
+                          "a refused build (destination exe locked) must swap nothing")
+
+        # The lock is released (the `finally` above already unlocked and
+        # closed the handle) -- a normal rebuild must recover on its own.
+        third = self.run_build()
+        self.assertEqual(0, third.returncode, third.stdout + third.stderr)
 
 
 class TemporaryPathSpellingTests(unittest.TestCase):
@@ -27382,6 +28063,7 @@ CI_GROUPS = {
         "PublicTreeNamesNoCheckoutTests",
         "PowerShellVersionGateTests", "PackageOutputDirectorySafetyTests",
         "PackageOutputDirectoryPipelineTests", "PackageScriptDeletionLintTests",
+        "BuildLauncherScriptLintTests", "BuildLauncherPipelineTests",
         "TemporaryPathSpellingTests",
         "InterpreterGuardTests", "SuiteDependencyGuardTests",
     ],

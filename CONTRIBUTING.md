@@ -101,6 +101,20 @@ launcher owns no process logic of its own — see `launcher/README.md`.
 scripts, not a user-facing entry point: they carry the same PowerShell-7 gate
 as every script here, but they are never something an ordinary user runs.
 
+### Local developer build
+
+```powershell
+pwsh .\scripts\build-launcher.ps1
+```
+
+Builds the current checkout — uncommitted changes included — into
+`artifacts\dev\LocalCanvas\LocalCanvas.exe`, a runnable LocalCanvas folder you
+can double-click straight from a working tree, without a GitHub Release or a
+CI download. It is the same launcher, built the same way `launcher\package.ps1`
+builds the release zip; only the packaging mechanics differ, and a rebuild
+preserves whatever your own `.venv`, `config\local\` and `.runtime\` already
+hold there. `scripts\build-launcher.ps1` is a maintainer script too.
+
 ## What CI runs
 
 `.github/workflows/ci.yml`, on `windows-latest`, for every push to `main` and

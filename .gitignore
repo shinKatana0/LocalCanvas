@@ -29,6 +29,11 @@ launcher/**/TestResults/
 # launcher/package.ps1's own staging folder and the zip it writes.
 launcher/dist/
 
+# scripts/build-launcher.ps1's own local dogfood build: a runnable
+# LocalCanvas folder that also holds your own .venv, config/local content
+# and .runtime once you have used it, none of which belongs in git either.
+artifacts/
+
 # Signing material. None ships; a keystore you create stays out of git.
 app/android/key.properties
 *.jks

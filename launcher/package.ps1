@@ -27,15 +27,17 @@
     a dirty tree is refused by default (see -AllowDirty).
 
     WHAT SHIPS, at the root of the zip's single LocalCanvas\ folder:
-    LocalCanvas.exe; scripts\ without scripts\tests\; gateway\ without
-    gateway\tests\ and without gateway\conftest.py (pytest-only: it puts
-    gateway\ on sys.path for pytest, and nothing setup.ps1, start.ps1 or the
-    gateway package itself ever reads); comfy\ without any comfy\tests\; config\examples\;
-    config\local\.gitkeep only; workflows\examples\; docs\; LICENSE,
-    README.md, README.ru.md, README.ja.md, CHANGELOG.md, SECURITY.md,
-    CONTRIBUTING.md. Nothing else -- in particular never app\, the launcher's
-    own sources, .github\, .gitignore, any directory named tests, or anything
-    under a build output, a cache or config\local\ besides the placeholder.
+    LocalCanvas.exe; scripts\ without scripts\tests\ and without
+    scripts\build-launcher.ps1 (a maintainer tool, like this script itself);
+    gateway\ without gateway\tests\ and without gateway\conftest.py
+    (pytest-only: it puts gateway\ on sys.path for pytest, and nothing
+    setup.ps1, start.ps1 or the gateway package itself ever reads); comfy\
+    without any comfy\tests\; config\examples\; config\local\.gitkeep only;
+    workflows\examples\; docs\; LICENSE, README.md, README.ru.md,
+    README.ja.md, CHANGELOG.md, SECURITY.md, CONTRIBUTING.md. Nothing else --
+    in particular never app\, the launcher's own sources, .github\,
+    .gitignore, any directory named tests, or anything under a build output,
+    a cache or config\local\ besides the placeholder.
 
 .PARAMETER OutputDirectory
     Where the zip is written. Defaults to launcher\dist\, which is gitignored.
@@ -104,6 +106,11 @@ function Test-LcPackageEntryAllowed {
     # pytest-only: puts gateway\ on sys.path for pytest and is read by nothing
     # setup.ps1, start.ps1 or the gateway package itself ever imports.
     if ($Path -eq 'gateway/conftest.py') { return $false }
+    # A maintainer tool, not something a user of the release zip runs -- the
+    # same reason launcher/package.ps1 itself never ships, but this one lives
+    # under scripts/ (see MAINTAINER_SCRIPTS, scripts\tests\run_tests.py) so
+    # the "no tests/ segment" rule below would otherwise let it through.
+    if ($Path -eq 'scripts/build-launcher.ps1') { return $false }
     if ($Path -eq $script:ConfigLocalPlaceholder) { return $true }
     if ($Path.StartsWith($script:ConfigExamplesPrefix, [System.StringComparison]::Ordinal)) { return $true }
     if ($Path.StartsWith($script:WorkflowExamplesPrefix, [System.StringComparison]::Ordinal)) { return $true }
@@ -138,6 +145,7 @@ function Test-LcPackageEntryForbidden {
     }
     if ($normalized -eq "$($script:ZipRootFolder)/.gitignore") { return $true }
     if ($normalized -eq "$($script:ZipRootFolder)/gateway/conftest.py") { return $true }
+    if ($normalized -eq "$($script:ZipRootFolder)/scripts/build-launcher.ps1") { return $true }
     # The launcher's own C# sources: LocalCanvas.exe itself is allowed, and is
     # the only thing directly under the zip root beside the shipped folders.
     if ($normalized -match '(?i)^LocalCanvas/launcher/') { return $true }
@@ -234,12 +242,52 @@ function Get-LcPackageVersion {
     return "$version".Trim()
 }
 
-# Dot-sourcing (`. launcher\package.ps1`) defines the two functions above and
+function Invoke-LcLauncherPublish {
+    <#
+        Runs the launcher's win-x64 publish profile (self-contained,
+        single-file, Release) -- the one step this script and
+        scripts\build-launcher.ps1 must never each write their own copy of, so
+        a release zip's exe and a local dev build's exe come from the exact
+        same `dotnet publish` invocation shape.
+
+        -SkipPublish reuses whatever is already at $PublishedExePath instead
+        of publishing again -- for iterating without waiting on a full
+        self-contained publish; the caller is responsible for deciding when
+        that is safe. -ExtraPublishArgs is appended after the fixed profile
+        arguments, unused by this script's own release build and read by
+        scripts\build-launcher.ps1 to add build-time provenance (SourceRevisionId).
+    #>
+    param(
+        [Parameter(Mandatory)][string]$LauncherProject,
+        [Parameter(Mandatory)][string]$PublishedExePath,
+        [switch]$SkipPublish,
+        [string[]]$ExtraPublishArgs = @()
+    )
+    if ($SkipPublish) {
+        Write-Host 'SkipPublish was given: reusing the existing publish output.'
+        if (-not (Test-Path -LiteralPath $PublishedExePath -PathType Leaf)) {
+            throw "SkipPublish was given but $PublishedExePath does not exist. Publish at least once."
+        }
+        return
+    }
+    Write-Host 'Publishing the launcher (dotnet publish, win-x64)...'
+    $publishArgs = @($LauncherProject, '-c', 'Release', '-p:PublishProfile=win-x64') + @($ExtraPublishArgs)
+    & dotnet publish @publishArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "dotnet publish failed with exit code $LASTEXITCODE."
+    }
+    if (-not (Test-Path -LiteralPath $PublishedExePath -PathType Leaf)) {
+        throw "dotnet publish reported success but $PublishedExePath is missing."
+    }
+}
+
+# Dot-sourcing (`. launcher\package.ps1`) defines the functions above and
 # runs nothing else -- how a self-test exercises Test-LcPackageEntryAllowed and
 # Test-LcPackageEntryForbidden against a deliberately planted forbidden entry
-# without publishing, staging or zipping anything. An ordinary run
-# (`pwsh -File launcher\package.ps1`) is unaffected: InvocationName is then the
-# script's own path, never the dot.
+# without publishing, staging or zipping anything, and how
+# scripts\build-launcher.ps1 reuses the same allowlist, version reader and
+# publish step. An ordinary run (`pwsh -File launcher\package.ps1`) is
+# unaffected: InvocationName is then the script's own path, never the dot.
 if ($MyInvocation.InvocationName -eq '.') { return }
 
 # ---------------------------------------------------------------------------
@@ -280,21 +328,7 @@ Write-Host "Version: $version (from launcher\Directory.Build.props)"
 
 # -- 1. publish ---------------------------------------------------------
 
-if ($SkipPublish) {
-    Write-Host 'SkipPublish was given: reusing the existing publish output.'
-    if (-not (Test-Path -LiteralPath $publishedExe -PathType Leaf)) {
-        throw "SkipPublish was given but $publishedExe does not exist. Publish at least once."
-    }
-} else {
-    Write-Host 'Publishing the launcher (dotnet publish, win-x64)...'
-    & dotnet publish $launcherProject -c Release -p:PublishProfile=win-x64
-    if ($LASTEXITCODE -ne 0) {
-        throw "dotnet publish failed with exit code $LASTEXITCODE."
-    }
-    if (-not (Test-Path -LiteralPath $publishedExe -PathType Leaf)) {
-        throw "dotnet publish reported success but $publishedExe is missing."
-    }
-}
+Invoke-LcLauncherPublish -LauncherProject $launcherProject -PublishedExePath $publishedExe -SkipPublish:$SkipPublish
 $exeInfo = Get-Item -LiteralPath $publishedExe
 $exeSha256 = Get-LcFileSha256 -Path $publishedExe
 Write-Host "LocalCanvas.exe: $($exeInfo.Length) bytes, SHA-256 $exeSha256"
