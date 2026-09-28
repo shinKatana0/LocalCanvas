@@ -95,9 +95,9 @@ walks through every step, the tray icon and menu, and what to do when
 something goes wrong.
 
 **Smart App Control.** `LocalCanvas.exe` is not code-signed. On a PC with
-Smart App Control (a Windows Security setting) turned on, Windows blocks it
-outright — there is no "Run anyway". The
-[command-line path](docs/user-guide.md#14-advanced-command-line) runs fine
+Smart App Control (a Windows Security setting) turned on, Windows may block
+it because it is unsigned; when it does, there is no "Run anyway". The
+[command-line path](docs/user-guide.md#14-advanced-command-line) still works
 under Smart App Control, because it runs through Microsoft-signed `pwsh`.
 
 ## Daily use
@@ -181,7 +181,7 @@ which can do whatever their authors or providers wrote — see
 
 - The PC side is **Windows only**.
 - `LocalCanvas.exe` is unsigned. Some Windows security configurations may warn
-  about or block unsigned executables — Smart App Control blocks it outright —
+  about or block unsigned executables — Smart App Control may block it —
   and the command-line path is the alternative (see Quick start above).
   LocalCanvas does not ask you to weaken Windows security to run it.
 - The maintainer has tested pairing and generation by hand on one foldable

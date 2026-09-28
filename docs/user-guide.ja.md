@@ -753,9 +753,9 @@ LocalCanvas が何を動いていると考えているかを日々確かめる�
 
 **Windows セキュリティの設定によっては、署名の無い実行ファイルについて警告し
 たりブロックしたりすることがあり、Smart App Control は `LocalCanvas.exe` を
-問答無用でブロックします。** Smart App Control が有効な PC では、Windows は
-署名の無い実行ファイルの実行を拒否します —— 「実行」を選べるダイアログは出ま
-せん。`LocalCanvas.exe` には署名がありません。代わりにコマンドラインの道筋を
+ブロックすることがあります。** Smart App Control が有効な PC では、Windows は
+署名の無い実行ファイルの実行を拒否することがあります —— そうなった場合、「実行」を
+選べるダイアログは出ません。`LocalCanvas.exe` には署名がありません。代わりにコマンドラインの道筋を
 使ってください（第 14 節）。これは `pwsh` を通るので、Microsoft の署名があり、
 影響を受けません。LocalCanvas は、それを実行するために Windows のセキュリティ
 を弱めるようお願いすることはありません。その PC で Smart App Control を無効に
@@ -767,12 +767,9 @@ LocalCanvas が何を動いていると考えているかを日々確かめる�
 ダウンロードした zip から展開したファイルには Mark of the Web が付きます。
 `LocalCanvas.exe` はこれに対して何もする必要がありません —— 実行するスクリプト
 はすべて `-ExecutionPolicy Bypass` で動かすので、このマークの影響を受けません。
-一方、PowerShell から直接自分で実行するスクリプトはそうではないので、展開した
-`LocalCanvas` フォルダーの中で一度、これを解除してください:
-
-```powershell
-Get-ChildItem -Recurse | Unblock-File
-```
+一方、PowerShell から直接自分で実行するスクリプトはそうではないので、手作業で
+スクリプトを実行するときはリポジトリの `git clone` を使ってください（第 14 節）:
+クローンから来たファイルには Mark of the Web が付きません。
 
 **スクリプトが起動を拒否する: 「cannot be run because it contained a `#requires`
 statement」。** Windows PowerShell 5.1 で実行しています。LocalCanvas はこのシェル
@@ -905,12 +902,9 @@ git clone https://github.com/shinKatana0/LocalCanvas.git LocalCanvas
 cd LocalCanvas
 ```
 
-ファイルが `git clone` ではなくダウンロードした zip から来ている場合は、何かを
-実行する前に一度、フォルダーの中で Mark of the Web を解除してください:
-
-```powershell
-Get-ChildItem -Recurse | Unblock-File
-```
+コマンドラインの道筋は `git clone` から使うことを想定しています —— クローンから
+来たファイルには Mark of the Web が付きません。zip は `LocalCanvas.exe` のための
+ものです。
 
 ### インストールと起動
 
@@ -1087,8 +1081,8 @@ ComfyUI はそれを保持します。LocalCanvas はそれらをすべて Comfy
 - PC 側は **Windows のみ**です。
 - `LocalCanvas.exe` には署名がありません。Windows セキュリティの設定によって
   は、署名の無い実行ファイルについて警告したりブロックしたりすることがあります。
-  Smart App Control が有効な PC では「実行」を選べるダイアログも無く問答無用で
-  ブロックされます。コマンドラインの道筋（第 14 節）はその影響を受けず、メンテ
+  Smart App Control が有効な PC ではブロックされることがあり、そうなった場合、
+  「実行」を選べるダイアログも出ません。コマンドラインの道筋（第 14 節）はその影響を受けず、メンテ
   ナーが実際に日常使っているのはこちらです。LocalCanvas は、それを実行するために
   Windows のセキュリティを弱めるようお願いすることはありません。
 - トレイランチャー自体は、Smart App Control を無効にした PC で最後まで確かめられて

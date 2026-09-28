@@ -110,8 +110,9 @@ LocalCanvas は、すでにお持ちの ComfyUI ワークフローのための A
 [ユーザーガイド](docs/user-guide.ja.md)で詳しく説明しています。
 
 **Smart App Control。** `LocalCanvas.exe` にはコード署名がありません。
-Smart App Control（Windows セキュリティの設定）が有効な PC では、Windows は
-これを問答無用でブロックします —— 「実行」を選べるダイアログは出ません。
+Smart App Control（Windows セキュリティの設定）が有効な PC では、Windows が
+署名が無いことを理由にこれをブロックすることがあります —— そうなった場合、
+「実行」を選べるダイアログは出ません。
 [コマンドラインでの手順](docs/user-guide.ja.md#14-コマンドラインでの詳しい操作)は
 Microsoft が署名した `pwsh` を通るので、Smart App Control の影響を受けず問題なく
 動きます。
@@ -206,7 +207,7 @@ ComfyUI（自分で起動したかどうかを問いません）への loopback 
 - PC 側は **Windows のみ**です。
 - `LocalCanvas.exe` には署名がありません。Windows セキュリティの設定によって
   は、署名の無い実行ファイルについて警告したりブロックしたりすることがあります
-  —— Smart App Control は問答無用でブロックします —— その代わりとしてコマンド
+  —— Smart App Control がブロックすることがあります —— その代わりとしてコマンド
   ラインでの手順（上のクイックスタートを参照）があります。LocalCanvas は、それ
   を実行するために Windows のセキュリティを弱めるようお願いすることはありません。
 - 手作業では、メンテナーが折りたたみスマートフォン 1 台で、Wi-Fi 経由で本物の

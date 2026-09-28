@@ -736,9 +736,9 @@ the fix — `pwsh .\scripts\stop.ps1 -Component Gateway` — then stop it once a
 start again.
 
 **Some Windows security configurations may warn about or block unsigned
-executables, and Smart App Control blocks `LocalCanvas.exe` outright.** On a
-PC with Smart App Control on, Windows refuses to run an unsigned executable —
-there is no "Run anyway" dialog to click through. `LocalCanvas.exe` is
+executables, and Smart App Control may block `LocalCanvas.exe`.** On a
+PC with Smart App Control on, Windows may refuse to run an unsigned executable —
+when it does, there is no "Run anyway" dialog to click through. `LocalCanvas.exe` is
 unsigned. Use the command-line path instead (section 14): it runs through
 `pwsh`, which is Microsoft-signed and unaffected. LocalCanvas does not ask you
 to weaken Windows security to run it. Turning Smart App Control off is a
@@ -750,12 +750,9 @@ or a security warning naming the internet zone).** Files extracted from a zip
 downloaded from the internet carry a Mark of the Web. `LocalCanvas.exe` needs
 nothing done about it: every script it runs, it runs with
 `-ExecutionPolicy Bypass`, which is unaffected by the mark. A script you run
-yourself, directly from PowerShell, is not — clear the mark once, from inside
-the extracted `LocalCanvas` folder:
-
-```powershell
-Get-ChildItem -Recurse | Unblock-File
-```
+yourself, directly from PowerShell, is not — for running scripts by hand, use
+a `git clone` of the repository instead (section 14): files from a clone
+carry no Mark of the Web.
 
 **A script refuses to start: "cannot be run because it contained a `#requires`
 statement".** You are running it in Windows PowerShell 5.1, which LocalCanvas
@@ -887,12 +884,8 @@ git clone https://github.com/shinKatana0/LocalCanvas.git LocalCanvas
 cd LocalCanvas
 ```
 
-If the files came from a downloaded zip rather than `git clone`, clear the
-Mark of the Web once before running anything, from inside the folder:
-
-```powershell
-Get-ChildItem -Recurse | Unblock-File
-```
+The command-line path is meant to be used from a `git clone` — files from a
+clone carry no Mark of the Web. The zip is for `LocalCanvas.exe`.
 
 ### Install and start
 
@@ -1074,8 +1067,8 @@ itself.
 
 - The PC side is **Windows only**.
 - `LocalCanvas.exe` is unsigned. Some Windows security configurations may
-  warn about or block unsigned executables; Smart App Control blocks it
-  outright, with no "Run anyway". The command-line path (section 14) is
+  warn about or block unsigned executables; Smart App Control may block it,
+  with no "Run anyway". The command-line path (section 14) is
   unaffected and is what the maintainer actually runs day to day. LocalCanvas
   does not ask you to weaken Windows security to run it.
 - The tray launcher itself has not been exercised end to end on a PC with
