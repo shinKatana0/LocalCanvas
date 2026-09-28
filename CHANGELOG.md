@@ -4,6 +4,75 @@ Notable changes, in user terms. The app and the gateway are one product with two
 halves: they share a minor version and a single `api_version`, and
 `docs/versioning.md` says what that means for compatibility.
 
+## v0.2.0 — the Windows tray launcher
+
+Launcher **0.2.0** (new) · Gateway **0.1.1 → 0.1.2** · App **0.1.5** (unchanged) ·
+`api_version` **1** (unchanged)
+
+### `LocalCanvas.exe`
+
+- **A one-click Windows launcher.** Download
+  `LocalCanvas-0.2.0-windows-x64.zip`, extract it, double-click
+  `LocalCanvas.exe`. It runs first-time setup for you in a PowerShell window
+  it opens itself, then verifies ComfyUI (starting it too, in managed mode)
+  and the Gateway, and settles into the system tray: a status icon, a menu
+  (Restart Gateway, Sync workflows, Open status, Exit) and a status window
+  with the pairing address, a QR code and the workflow count. The scripts
+  themselves gained what the launcher needed to drive them unattended and
+  tell one running instance from another: a `-Json` machine interface with
+  `-Component` on `start.ps1` and `stop.ps1` (available on the command line
+  too, though an ordinary run needs neither), and a gateway instance identity
+  (`--instance-id`, echoed by `GET /api/v1/info`) with the port check that
+  refuses to start a second gateway onto one already in use — both of which
+  apply to every start, on either path.
+- **The command line is unaffected and unremoved.** Every script keeps
+  working exactly as before; the launcher is a second front end for the same
+  runtime, not a replacement for the first one. It is now the *Advanced*
+  path.
+- **One launcher per Windows session.** A second double-click brings the
+  first one's status window forward instead of starting a second copy.
+- **Ownership and shutdown are unchanged in substance.** Exit stops only what
+  LocalCanvas started, through `stop.ps1`; an external or reused ComfyUI is
+  left running. Signing out or shutting down Windows stops LocalCanvas the
+  same way, automatically, with up to 45 seconds held for it. Under heavy
+  load, a Gateway start still in progress when that budget ends is left
+  running rather than interrupted, and is reported as such.
+- **Unsigned.** This project holds no code-signing certificate, so
+  `LocalCanvas.exe` is unsigned. On a PC with Smart App Control turned on,
+  Windows may block it because it is unsigned, with no "Run anyway" — use
+  the command-line path there. This is a stated limitation, not a
+  bug: see [README.md](README.md#known-limitations).
+
+### Upgrading from v0.1.5
+
+If a v0.1.5 gateway is still running when you start v0.2.0, it is refused —
+not silently reused. `start.ps1` (and so the launcher) reports
+`Port 7801 is already in use` and names the fix:
+`pwsh .\scripts\stop.ps1 -Component Gateway`. Stop it once, then start again.
+
+### Gateway 0.1.2
+
+- `GET /api/v1/info` now reports an `instance_id` and `jobs.active`, so a
+  caller can tell one gateway process from another that happens to answer on
+  the same port, and can tell whether it is safe to restart without asking.
+- The gateway process itself accepts `--instance-id` (`start.ps1` sets it on
+  every launch, so a caller's readiness check can tell this instance's answer
+  from any other one on the same port), and its `qr` command accepts `--png`
+  to write the pairing QR as an image — both additive, and both what the
+  launcher's own tray uses. `api_version` does not move: these are additions
+  an older app survives without noticing.
+
+### Privacy
+
+- **No LocalCanvas-owned analytics or usage telemetry in this release**, same
+  as before; the launcher adds none. The Android app is unchanged
+  (**0.1.5**) — a privacy review for this release found that its QR/barcode
+  scanning uses Google ML Kit, whose own dependency tree includes a
+  Google/Firebase `datatransport` component. It is not LocalCanvas's code;
+  LocalCanvas does not enable, configure or inspect it, and makes no claim
+  about what, if anything, it sends. Disclosed in
+  [SECURITY.md](SECURITY.md) and `docs/privacy-security.md`.
+
 ## v0.1.5 — first public release
 
 App **0.1.5** (build 6) · Gateway **0.1.1** · `api_version` **1** · tag `v0.1.5`
@@ -77,10 +146,10 @@ The first release. Everything below is new, because there was nothing before it.
 
 ### Privacy
 
-- No telemetry, no analytics, no crash reporting, no accounts, no cloud
-  generation, no hosted QR service. `docs/privacy-security.md` states each claim
-  and its evidence, including the two third-party Android components that ship
-  with the app.
+- No LocalCanvas-owned telemetry, analytics or crash reporting; no accounts;
+  no cloud generation; no hosted QR service. `docs/privacy-security.md` states
+  each claim and its evidence, including the third-party Android components
+  that ship with the app.
 
 ### Known limitations at v0.1
 

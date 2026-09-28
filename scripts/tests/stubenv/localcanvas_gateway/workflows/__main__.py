@@ -19,8 +19,8 @@ second stub:
 
     LC_STUB_SYNC_MARKER   append the argv of each invocation to this file
     LC_STUB_SYNC_MODE     ok | tree | attention | legacy | rewritten | fatal |
-                          inventory-setting | token-in-path | inventory |
-                          garbage | silent | crash (default: ok)
+                          fatal-long | inventory-setting | token-in-path |
+                          inventory | garbage | silent | crash (default: ok)
 
 ``tree`` is the one mode with a real folder behind it (T-0322): it hashes the
 files in ``LC_STUB_SYNC_SOURCE``, compares them with ``LC_STUB_SYNC_STATE`` and
@@ -870,6 +870,13 @@ def _sync_command(argv):
             file=sys.stderr,
             flush=True,
         )
+        return EXIT_FATAL
+    if mode == "fatal-long":
+        # More, and longer, lines than a -Json error carries: the bound on
+        # what sync-workflows.ps1 copies out of the engine's own words.
+        print("[FAIL] " + "x" * 1000, file=sys.stderr, flush=True)
+        for number in range(1, 60):
+            print("       engine line {:02d}".format(number), file=sys.stderr, flush=True)
         return EXIT_FATAL
     if mode == "inventory-setting":
         # Mirrors ...sync/config.py for an output section with no inventory.

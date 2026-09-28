@@ -13,8 +13,10 @@ unauthenticated, safe to poll.
   "service": "localcanvas",
   "api_version": 1,
   "gateway_version": "0.1.0",
+  "instance_id": "3f9a2b7c1d4e6f8091a2b3c4d5e6f708",
   "display_name": "My Generation PC",
   "comfy": { "status": "ready", "detail": null },
+  "jobs": { "active": 0 },
   "capabilities": {
     "cancel": true, "media_upload": true, "events": true,
     "translation": { "enabled": true, "installed": true,
@@ -25,6 +27,18 @@ unauthenticated, safe to poll.
 
 `comfy.status` — `ready` | `starting` | `unavailable`. `detail` is a short
 human-readable string when not `ready`, never a stack trace.
+
+`instance_id` — 32 lowercase hex characters identifying **this running
+process**, not this build. It changes on every gateway start (`--instance-id`
+on the command line names one explicitly; left out, the gateway generates one)
+and is how something watching from outside — a launcher or process monitor — tells
+this gateway apart from a different one that happens to be listening on the
+same port. A client that only needs compatibility keeps checking `service` and
+`api_version`, exactly as before this key existed.
+
+`jobs.active` — how many jobs this gateway currently has in state `queued` or
+`running`. Read from the gateway's own job store, not from ComfyUI, so it costs
+nothing extra on top of the `comfy.status` probe this endpoint already makes.
 
 **The client MUST reject a response whose `service` is not exactly
 `"localcanvas"`**, and MUST refuse to treat an arbitrary HTTP service as a

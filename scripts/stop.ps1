@@ -43,16 +43,55 @@
 
 .PARAMETER PythonExe
     LocalCanvas's own interpreter. Default: .venv\Scripts\python.exe.
+
+.PARAMETER Component
+    All (the default) handles both roles, as above. Gateway handles the
+    gateway role only: the ComfyUI ownership record is neither read nor
+    touched, and nothing about ComfyUI is probed or reported.
+
+.PARAMETER Json
+    Print exactly one JSON document on standard output -- per role, the
+    ownership state found, what was done and how the stop ended -- and every
+    human line on standard error. Exit codes are unchanged
+    (docs/runtime.md, "Machine interface").
 #>
 [CmdletBinding()]
 param(
     [string]$Config,
-    [string]$PythonExe
+    [string]$PythonExe,
+    [ValidateSet('All', 'Gateway')][string]$Component = 'All',
+    [switch]$Json
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\Common.ps1')
+if ($Json) { Enable-LcMachineOutput }
+
+# What a -Json run reports, per role: the Resolve-LcOwnedProcess state found,
+# the action taken, and -- for a stop -- Stop-LcOwnedProcess's outcome. A role
+# this run does not handle stays 'skipped'.
+$roleResults = [ordered]@{
+    gateway = [ordered]@{ state_before = $null; action = 'skipped'; result = $null; pid = $null }
+    comfy   = [ordered]@{ state_before = $null; action = 'skipped'; result = $null; pid = $null }
+}
+
+function Complete-Run {
+    # Every way out of this script, so that a -Json run prints its one
+    # document on every path.
+    param([Parameter(Mandatory)][int]$Code)
+    if ($Json) {
+        try {
+            $document = New-LcResultDocument -ExitCode $Code -Ok ($Code -eq 0)
+            $document['component'] = $Component
+            $document['roles'] = $roleResults
+            Write-LcResultDocument -Document $document
+        } catch {
+            Write-LcResultFallback -ExitCode $Code -Reason "$($_.Exception.Message)"
+        }
+    }
+    exit $Code
+}
 
 $repoRoot = Get-LcRepoRoot
 if (-not $Config) { $Config = Join-Path $repoRoot 'config\local\runtime.yaml' }
@@ -67,17 +106,25 @@ function Stop-Role {
         [Parameter(Mandatory)][string]$Label
     )
     $owned = Resolve-LcOwnedProcess -Role $Role
+    $said = $roleResults[$Role]
+    $said.state_before = $owned.State
+    $said.action = 'none'
+    if ($null -ne $owned.Record -and (Test-LcHasProperty -Object $owned.Record -Name 'pid')) {
+        $said.pid = $owned.Record.pid
+    }
     switch ($owned.State) {
         'none' {
             Write-LcInfo "$Label is not owned by LocalCanvas - nothing to stop"
             return $false
         }
         'stale' {
+            $said.action = 'record_removed'
             Remove-LcOwnedProcessRecord -Role $Role
             Write-LcInfo "$Label - stale PID file removed ($($owned.Reason))"
             return $false
         }
         'unreadable' {
+            $said.action = 'record_removed'
             Remove-LcOwnedProcessRecord -Role $Role
             Write-LcInfo "$Label - unusable PID file removed ($($owned.Reason))"
             return $false
@@ -89,6 +136,7 @@ function Stop-Role {
             Write-LcWarn "$Label - PID $($owned.Record.pid) is NOT the process LocalCanvas started"
             Write-LcDetail $owned.Reason
             Write-LcDetail 'Leaving that process alone and removing the ownership record, which now describes a process that no longer exists.'
+            $said.action = 'record_removed'
             Remove-LcOwnedProcessRecord -Role $Role
             return $false
         }
@@ -98,6 +146,7 @@ function Stop-Role {
             # turned "owned but temporarily unverifiable" into "unowned
             # forever": the process kept running and nothing could reclaim it.
             # So it is left alone AND the record is kept.
+            $said.action = 'record_kept'
             Write-LcWarn "$Label - LocalCanvas could not prove it owns PID $($owned.Record.pid)"
             Write-LcDetail $owned.Reason
             Write-LcDetail "PID $($owned.Record.pid) is still running and was NOT stopped."
@@ -108,7 +157,9 @@ function Stop-Role {
         'running' {
             $processId = $owned.Record.pid
             Write-LcInfo "Stopping $Label (PID $processId)..."
+            $said.action = 'stop'
             $outcome = Stop-LcOwnedProcess -Process $owned.Process
+            $said.result = $outcome
             if ($outcome -eq 'still-running') {
                 Write-LcWarn "$Label (PID $processId) did not exit; the ownership record was kept."
                 return $false
@@ -124,7 +175,7 @@ function Stop-Role {
 try {
     Write-LcBanner
     Write-LcInfo 'Stopping LocalCanvas'
-    Write-Host ''
+    Write-LcLine ''
 
     # Configuration is a nicety here, not a requirement: ownership records
     # carry everything needed to stop what we started.
@@ -141,7 +192,7 @@ try {
         } else {
             Write-LcWarn "$($loaded.What); stopping only what the ownership records name."
             foreach ($line in $loaded.Detail) { Write-LcDetail $line }
-            Write-Host ''
+            Write-LcLine ''
         }
     } catch {
         # Including a failure of the seam itself. Whatever the configuration
@@ -154,10 +205,20 @@ try {
             @("$($_.Exception.Message)")
         }
         foreach ($line in $detail) { Write-LcDetail $line }
-        Write-Host ''
+        Write-LcLine ''
     }
 
     [void](Stop-Role -Role 'gateway' -Label 'LocalCanvas Gateway')
+
+    if ($Component -eq 'Gateway') {
+        # The gateway role only. The ComfyUI ownership record is not read, and
+        # ComfyUI is neither probed nor mentioned: restarting the gateway must
+        # not be able to touch what it runs on.
+        Write-LcLine ''
+        Write-LcOk 'Done'
+        Write-LcLine ''
+        Complete-Run 0
+    }
 
     # Ownership decides, not the mode. A ComfyUI whose record proves LocalCanvas
     # started it is stopped; anything else is left exactly where it is.
@@ -177,17 +238,17 @@ try {
         }
     }
 
-    Write-Host ''
+    Write-LcLine ''
     Write-LcOk 'Done'
-    Write-Host ''
-    exit 0
+    Write-LcLine ''
+    Complete-Run 0
 } catch {
     if (Test-LcSeamFailure -ErrorRecord $_) {
         $lines = Get-LcSeamFailureLines -ErrorRecord $_
         Write-LcFailure -What $lines[0] -Detail @($lines | Select-Object -Skip 1)
-        exit 1
+        Complete-Run 1
     }
     Write-LcFailure -What 'Stopping LocalCanvas did not complete' -Detail @("$($_.Exception.Message)") `
         -Fix 'Run scripts\status.ps1 to see what is still running.' -ErrorRecord $_
-    exit 1
+    Complete-Run 1
 }

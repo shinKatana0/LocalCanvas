@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <AssemblyName>LocalCanvas</AssemblyName>
+    <RootNamespace>LocalCanvas.Launcher</RootNamespace>
+    <AssemblyTitle>LocalCanvas</AssemblyTitle>
+    <Description>Starts LocalCanvas and keeps it in the Windows system tray.</Description>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Resources\Icons\app.ico</ApplicationIcon>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Required by the source-generated interop for the two shutdown-reason calls. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="LocalCanvas.Launcher.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      The tray-state icons, embedded so the published single-file exe carries
+      them: there is no second file beside it to load them from at runtime.
+      launcher\tools\generate-icons.ps1 is what writes the .ico files;
+      nothing at build time re-runs it.
+    -->
+    <EmbeddedResource Include="Resources\Icons\ready.ico" LogicalName="LocalCanvas.Launcher.Icons.ready.ico" />
+    <EmbeddedResource Include="Resources\Icons\starting.ico" LogicalName="LocalCanvas.Launcher.Icons.starting.ico" />
+    <EmbeddedResource Include="Resources\Icons\syncing.ico" LogicalName="LocalCanvas.Launcher.Icons.syncing.ico" />
+    <EmbeddedResource Include="Resources\Icons\attention.ico" LogicalName="LocalCanvas.Launcher.Icons.attention.ico" />
+    <EmbeddedResource Include="Resources\Icons\down.ico" LogicalName="LocalCanvas.Launcher.Icons.down.ico" />
+    <EmbeddedResource Include="Resources\Icons\stopping.ico" LogicalName="LocalCanvas.Launcher.Icons.stopping.ico" />
+  </ItemGroup>
+
+</Project>

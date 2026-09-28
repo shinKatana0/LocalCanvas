@@ -34,12 +34,23 @@ is HTTP. What that ComfyUI does is yours to know.
 That is the model. If your network is not one you trust, LocalCanvas as it stands
 is not the right tool.
 
-## What LocalCanvas does not do
+## What LocalCanvas's own code does not do
 
-No telemetry, no analytics, no crash reporting, no accounts, no cloud
-generation, no hosted QR or pairing service. The claims and the evidence for each
-are in `docs/privacy-security.md`, including the two third-party Android
-components that ship with the app and what they add to its manifest.
+No telemetry, no analytics, no crash reporting of its own, no accounts, no
+cloud generation, no hosted QR or pairing service. The Android app's QR-code
+scanning uses Google ML Kit, which includes Google-provided components with
+their own network and data behaviour; LocalCanvas does not enable, configure
+or inspect that behaviour and makes no claim about what, if anything, it
+sends. The claims and the evidence for each are in `docs/privacy-security.md`,
+including the third-party Android components that ship with the app and what
+they add to its manifest.
+
+The Windows tray launcher (`LocalCanvas.exe`) adds nothing to that boundary.
+It makes no network call of its own beyond loopback health checks against the
+Gateway and ComfyUI it is watching, and it owns no process logic — every
+lifecycle action it takes is a call of the same scripts the command line uses
+(`CONTRIBUTING.md`, "The launcher's own boundaries"). Its log
+(`.runtime\launcher.log`) never leaves the machine.
 
 ## Reporting a problem
 

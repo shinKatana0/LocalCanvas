@@ -287,6 +287,17 @@ class JobStore:
         with self._lock:
             return self._jobs.get(job_id)
 
+    def active_count(self) -> int:
+        """How many jobs are ``queued`` or ``running`` right now.
+
+        Read off the store this process already holds: no ComfyUI call, no
+        refresh, just a count under the same lock every other method uses --
+        cheap enough for a handshake a client is expected to poll (`api/info.py`).
+        """
+
+        with self._lock:
+            return sum(1 for job in self._jobs.values() if job.state not in TERMINAL_STATES)
+
     def snapshot(self, job_id: str) -> Optional[Job]:
         """Refresh from ComfyUI and return the job, or ``None`` if unknown."""
 

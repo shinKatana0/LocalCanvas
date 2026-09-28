@@ -35,6 +35,10 @@ class GatewayState:
     comfy: ComfyClient
     jobs: JobStore
     media: MediaStore
+    #: Generated once per process (`--instance-id`, or `secrets.token_hex(16)`
+    #: when it was not given), so that whoever is watching this gateway can
+    #: tell it apart from a different process on the same port (`api/info.py`).
+    instance_id: str
     #: What fills ``workflows.binding``'s seam for this gateway.  Held here
     #: rather than reached for inside the submit handler, so that the one place
     #: a media value is decided is visible in the wiring.

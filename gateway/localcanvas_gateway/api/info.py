@@ -56,8 +56,15 @@ def info(request: Request) -> dict:
         "service": "localcanvas",
         "api_version": API_VERSION,
         "gateway_version": __version__,
+        # This process's own identity (`--instance-id`), not a fact about the
+        # gateway build -- unlike everything above it, this changes on every
+        # start (`docs/api.md`).
+        "instance_id": state.instance_id,
         "display_name": state.config.identity.display_name,
         "comfy": {"status": health.status.value, "detail": health.detail},
+        # No ComfyUI call and no registry work: a count already held by the
+        # job store this process owns (`jobs.py`), read under its own lock.
+        "jobs": {"active": state.jobs.active_count()},
         "capabilities": {
             **CAPABILITIES,
             # The one capability that is a block rather than a word, because

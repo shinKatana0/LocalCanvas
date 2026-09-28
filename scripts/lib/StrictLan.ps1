@@ -837,7 +837,12 @@ function Get-LcNetworkFacts {
     $profiles = @{}
     try {
         if (Get-Command Get-NetConnectionProfile -ErrorAction SilentlyContinue) {
-            foreach ($item in @(Get-NetConnectionProfile -ErrorAction Stop)) {
+            $read = @(Invoke-LcBoundedSystemQuery -What 'a network category query' -Query {
+                    Get-NetConnectionProfile -ErrorAction Stop | ForEach-Object {
+                        [pscustomobject]@{ InterfaceIndex = [int]$_.InterfaceIndex; NetworkCategory = [string]$_.NetworkCategory }
+                    }
+                })
+            foreach ($item in $read) {
                 $profiles[[int]$item.InterfaceIndex] = [string]$item.NetworkCategory
             }
         }
@@ -847,7 +852,17 @@ function Get-LcNetworkFacts {
 
     try {
         if (Get-Command Get-NetIPAddress -ErrorAction SilentlyContinue) {
-            foreach ($item in @(Get-NetIPAddress -ErrorAction Stop)) {
+            $read = @(Invoke-LcBoundedSystemQuery -What 'a network address query' -Query {
+                    Get-NetIPAddress -ErrorAction Stop | ForEach-Object {
+                        [pscustomobject]@{
+                            IPAddress      = [string]$_.IPAddress
+                            InterfaceIndex = [int]$_.InterfaceIndex
+                            InterfaceAlias = [string]$_.InterfaceAlias
+                            PrefixLength   = [int]$_.PrefixLength
+                        }
+                    }
+                })
+            foreach ($item in $read) {
                 $address = [string]$item.IPAddress
                 # Get-NetIPAddress renders a scoped IPv6 address as fe80::1%12.
                 if ($address -like '*%*') { $address = $address.Split('%')[0] }
@@ -869,13 +884,18 @@ function Get-LcNetworkFacts {
 
     try {
         if (Get-Command Get-NetRoute -ErrorAction SilentlyContinue) {
-            foreach ($prefix in @('0.0.0.0/0', '::/0')) {
-                foreach ($route in @(Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue)) {
-                    $hop = [string]$route.NextHop
-                    if ($hop -like '*%*') { $hop = $hop.Split('%')[0] }
-                    if (-not $hop -or $hop -eq '0.0.0.0' -or $hop -eq '::') { continue }
-                    if ($gateways -notcontains $hop) { $gateways += $hop }
-                }
+            $read = @(Invoke-LcBoundedSystemQuery -What 'a route table query' -Query {
+                    foreach ($prefix in @('0.0.0.0/0', '::/0')) {
+                        Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue | ForEach-Object {
+                            [pscustomobject]@{ NextHop = [string]$_.NextHop }
+                        }
+                    }
+                })
+            foreach ($route in $read) {
+                $hop = [string]$route.NextHop
+                if ($hop -like '*%*') { $hop = $hop.Split('%')[0] }
+                if (-not $hop -or $hop -eq '0.0.0.0' -or $hop -eq '::') { continue }
+                if ($gateways -notcontains $hop) { $gateways += $hop }
             }
         } else {
             $notes += 'Get-NetRoute is not available on this system, so the default gateway could not be read.'
@@ -886,7 +906,12 @@ function Get-LcNetworkFacts {
 
     try {
         if (Get-Command Get-DnsClientServerAddress -ErrorAction SilentlyContinue) {
-            foreach ($entry in @(Get-DnsClientServerAddress -ErrorAction Stop)) {
+            $read = @(Invoke-LcBoundedSystemQuery -What 'a DNS resolver query' -Query {
+                    Get-DnsClientServerAddress -ErrorAction Stop | ForEach-Object {
+                        [pscustomobject]@{ ServerAddresses = @($_.ServerAddresses | ForEach-Object { [string]$_ }) }
+                    }
+                })
+            foreach ($entry in $read) {
                 foreach ($address in @($entry.ServerAddresses)) {
                     $value = [string]$address
                     if ($value -like '*%*') { $value = $value.Split('%')[0] }
@@ -941,24 +966,34 @@ function Get-LcStrictLanRules {
     #>
     if (-not (Test-LcFirewallModuleAvailable)) { return $null }
     try {
-        $found = @(Get-NetFirewallRule -Group $script:LcStrictLanGroup -ErrorAction Stop |
-            ForEach-Object {
-                [pscustomobject]@{
-                    Name        = [string]$_.Name
-                    DisplayName = [string]$_.DisplayName
-                    Direction   = [string]$_.Direction
-                    Action      = [string]$_.Action
-                    Enabled     = [string]$_.Enabled
+        # Bounded (Invoke-LcBoundedSystemQuery), so the exception type is
+        # decided where the exception is: in the query.
+        $found = @(Invoke-LcBoundedSystemQuery -What 'a firewall query' -Arguments @{ Group = $script:LcStrictLanGroup } -Query {
+                try {
+                    Get-NetFirewallRule -Group $Group -ErrorAction Stop |
+                        ForEach-Object {
+                            [pscustomobject]@{
+                                Name        = [string]$_.Name
+                                DisplayName = [string]$_.DisplayName
+                                Direction   = [string]$_.Direction
+                                Action      = [string]$_.Action
+                                Enabled     = [string]$_.Enabled
+                            }
+                        }
+                } catch {
+                    # Unreadable is NOT the same answer as "there are none", and
+                    # the difference is the whole of `status` being honest: $null
+                    # means the firewall could not be read, an empty array means
+                    # it holds nothing of ours. Asking for a group that does not
+                    # exist is the SECOND of those and Windows reports it as an
+                    # error, so it is separated here by exception type rather
+                    # than by matching a localized message.
+                    if ($_.Exception.GetType().FullName -like '*CimJobException') { return }
+                    throw
                 }
             })
     } catch {
-        # Unreadable is NOT the same answer as "there are none", and the
-        # difference is the whole of `status` being honest: $null means the
-        # firewall could not be read, an empty array means it holds nothing
-        # of ours. Asking for a group that does not exist is the SECOND of
-        # those and Windows reports it as an error, so it is separated here by
-        # exception type rather than by matching a localized message.
-        if ($_.Exception.GetType().FullName -like '*CimJobException') { return , @() }
+        # The firewall could not be read, or did not answer in time.
         return $null
     }
     return , $found

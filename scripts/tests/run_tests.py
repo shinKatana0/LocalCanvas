@@ -74,6 +74,22 @@ COMFY_MODEL_LIBRARY = COMFY / "lib" / "Models.ps1"
 COMFY_DOCTOR_LIBRARY = COMFY / "lib" / "Doctor.ps1"
 COMFY_MANIFEST = COMFY / "manifest.json"
 COMFY_EXAMPLE_MANIFEST = REPO / "config" / "examples" / "comfy-bootstrap.example.json"
+# The Windows launcher's own packaging tool -- a maintainer script, never a
+# user-facing entry point (see MAINTAINER_SCRIPTS below).
+LAUNCHER = REPO / "launcher"
+PACKAGE_SCRIPT = LAUNCHER / "package.ps1"
+# The local developer build: a maintainer tool too, never something
+# a user runs -- see MAINTAINER_SCRIPTS below.
+#
+# DELIBERATELY NO "DEV_BUILD_OUTPUT_ROOT = REPO / 'artifacts' / 'dev'"
+# CONSTANT HERE. That is the developer's real dogfood folder once they have
+# used the script for real -- their own .venv, config\local content and
+# .runtime live there -- and a suite that can name it in one place can
+# reach into it from any test. BuildLauncherPipelineTests below points every
+# invocation of BUILD_LAUNCHER_SCRIPT at its own temporary directory
+# instead, through -OutputRootPathForTests, and a lint in that class proves
+# it never had to reconstruct this path to do so.
+BUILD_LAUNCHER_SCRIPT = SCRIPTS / "build-launcher.ps1"
 
 POLL_INTERVAL = 0.05
 
@@ -777,6 +793,15 @@ HELPER_SCRIPTS = (
     "comfy/lib/Bootstrap.ps1", "comfy/lib/Doctor.ps1", "comfy/lib/Models.ps1",
     "scripts/tests/comfy_syntax_tree.ps1",
 )
+#: Tracked .ps1 files that are maintainer tools: run by someone working on this
+#: repository (never by a user, never dot-sourced), outside scripts/ and comfy/.
+#: Each carries ENTRY_SCRIPT_REQUIRES on its first line like an entry script,
+#: but none prints the entry banner, so the entry-script run tests skip them.
+MAINTAINER_SCRIPTS = (
+    "launcher/package.ps1",
+    "launcher/tools/generate-icons.ps1",
+    "scripts/build-launcher.ps1",
+)
 
 
 def flattened_console_text(text):
@@ -864,6 +889,37 @@ def is_elevated() -> bool:
 def powershell_literal(text):
     """A Python string as a PowerShell single-quoted literal."""
     return "'" + str(text).replace("'", "''") + "'"
+
+
+def held_process_handles_script():
+    """Lines that read the launcher's own kept-on-purpose process handles.
+
+    ``LocalCanvas.ChildProcess`` (lib/Common.ps1) keeps one process handle
+    per launch in a private static list, for the life of the process that
+    launched them -- the retention the handle-count test is about. This
+    reads that list by reflection, rather than adding a public accessor to
+    production code for a test to call, and resolves each handle to the
+    process id it actually refers to (0 if the handle is no longer valid),
+    so a handle that was kept on the list but closed anyway is caught, not
+    just one that was never added.
+    """
+    return [
+        "$heldField = [LocalCanvas.ChildProcess].GetField(",
+        "    'Held', [System.Reflection.BindingFlags]::NonPublic -bor "
+        "[System.Reflection.BindingFlags]::Static)",
+        "$held = @($heldField.GetValue($null))",
+        "if (-not ('LcTestOwnedHandle' -as [type])) {",
+        "    Add-Type -TypeDefinition @'",
+        "using System;",
+        "using System.Runtime.InteropServices;",
+        "public static class LcTestOwnedHandle {",
+        "    [DllImport(\"kernel32.dll\", SetLastError = true)]",
+        "    public static extern int GetProcessId(IntPtr handle);",
+        "}",
+        "'@",
+        "}",
+        "$heldPids = @($held | ForEach-Object { [LcTestOwnedHandle]::GetProcessId($_) })",
+    ]
 
 
 # The variable that opts a run into checks whose verdict depends on machine
@@ -1211,6 +1267,28 @@ def tearDownModule():
             "THE SUITE CHANGED THIS MACHINE'S FIREWALL. " + difference +
             " No test may apply, remove or destroy a firewall rule."
         )
+
+
+class ScriptTimedOut(subprocess.TimeoutExpired):
+    """A script run that passed its bound, with what it printed before it was stopped.
+
+    subprocess.TimeoutExpired carries the partial output and prints none of it,
+    so a script that stalls reports only "timed out after 180 seconds" -- and
+    not which step it had reached. The output is where the step is named.
+    """
+
+    @staticmethod
+    def _text(value):
+        if value is None:
+            return ""
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return str(value)
+
+    def __str__(self):
+        return ("{}\n--- standard output before it was stopped ---\n{}\n"
+                "--- standard error before it was stopped ---\n{}").format(
+                    super().__str__(), self._text(self.stdout), self._text(self.stderr))
 
 
 class ScriptTestCase(unittest.TestCase):
@@ -1585,22 +1663,28 @@ class ScriptTestCase(unittest.TestCase):
             # the machine running the suite happens to be set up.
             command.extend([
                 "-WorkflowSources", str(self.workspace / "no workflow sources.yaml")])
-        return subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            # PowerShell writes UTF-8. text=True alone decodes with the
-            # machine's locale codepage, which on a non-English Windows
-            # makes the suite fail with a UnicodeDecodeError -- and pass
-            # again in a terminal that happens to be set to UTF-8. A test
-            # result that depends on which shell started it is not a result.
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=env if env is not None else self.script_env(),
-            cwd=str(REPO),
-        )
+        try:
+            return subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                # PowerShell writes UTF-8. text=True alone decodes with the
+                # machine's locale codepage, which on a non-English Windows
+                # makes the suite fail with a UnicodeDecodeError -- and pass
+                # again in a terminal that happens to be set to UTF-8. A test
+                # result that depends on which shell started it is not a result.
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                env=env if env is not None else self.script_env(),
+                cwd=str(REPO),
+            )
+        except subprocess.TimeoutExpired as expired:
+            # The same exception, now saying what the script had printed --
+            # so a stall names its own step instead of only its duration.
+            raise ScriptTimedOut(expired.cmd, expired.timeout,
+                                 output=expired.output, stderr=expired.stderr) from expired
 
     def run_strict_lan(self, *extra_args, refusal_path=False, **kwargs):
         """The ONE way this suite runs the strict LAN script.
@@ -1888,6 +1972,24 @@ def comfy_sources():
     directory boundary is a lint the next script walks around.
     """
     return powershell_sources_under(COMFY)
+
+
+def tracked_status(repo):
+    """`git status --porcelain` against ``repo``, or ``None`` if git failed.
+
+    Used by BuildLauncherPipelineTests to prove a dev build never modifies a
+    TRACKED file: an ignored path (artifacts/, .venv/, ...) never appears in
+    this output at all, so a build that only ever writes there leaves this
+    string identical before and after -- while a build that touched, say, a
+    tracked script by mistake would show up here immediately.
+    """
+    result = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def tracked_powershell_sources():
@@ -3321,9 +3423,21 @@ class RedirectedChildLaunchTests(ScriptTestCase):
         primary thread. Four must be closed, and exactly one -- the process
         handle -- is kept on purpose, so that Windows cannot hand the child's
         process id to anything else while the script that started it is still
-        running. So the growth of the launcher's own handle count over N
-        launches is N, plus whatever .NET's own Process objects are holding,
-        and never the 4N or 5N a missed close would show.
+        running.
+
+        The retention is asserted directly rather than inferred from the whole
+        process's HandleCount: that count also moves with unrelated handles
+        (runtime/thread-pool/GC finalisation) opened and released in the same
+        window, which made a bound on it fail intermittently even though the
+        launcher itself was behaving. What the launcher keeps is reachable --
+        it is a private list inside the same process, read here by reflection
+        -- so the count of what is actually held, and the identity of the
+        child process each held handle refers to, are checked exactly instead
+        of guessed at from a number that other code also moves. The leak
+        guard stays a ceiling on the whole process's handle growth: it has
+        never been the flaky side. It reliably catches the three-handle leak;
+        a single unclosed handle per launch lands only just above it, so
+        it is a coarse guard, not a proof that nothing leaks.
         """
         script = "\n".join([
             "$workspace = {}".format(powershell_literal(self.workspace)),
@@ -3343,10 +3457,13 @@ class RedirectedChildLaunchTests(ScriptTestCase):
             # So that a handle merely awaiting collection is not counted as one
             # that was never released.
             "[GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()",
+            "$after = Get-HandleCount",
+        ] + held_process_handles_script() + [
             "[pscustomobject]@{",
             "    Before = $before",
-            "    After = Get-HandleCount",
+            "    After = $after",
             "    Launched = @($launched)",
+            "    HeldPids = @($heldPids)",
             "} | ConvertTo-Json -Compress",
         ])
         result = self.run_powershell(script)
@@ -3356,18 +3473,30 @@ class RedirectedChildLaunchTests(ScriptTestCase):
         self.assertEqual(self.LAUNCHES, len(measured["Launched"]))
         self.assertEqual(len(set(measured["Launched"])), len(measured["Launched"]),
                          "two launches came back with the same process id")
+
+        # -- kept on purpose: measured directly, not inferred -------------
+        held = measured["HeldPids"]
+        self.assertEqual(
+            self.LAUNCHES, len(held),
+            "the launcher is holding {} process handles for {} launches, not "
+            "one each".format(len(held), self.LAUNCHES))
+        self.assertNotIn(
+            0, held,
+            "a handle the launcher keeps on purpose no longer refers to a "
+            "live process (GetProcessId returned 0): {}".format(held))
+        self.assertEqual(
+            sorted(measured["Launched"]), sorted(held),
+            "the handles the launcher keeps on purpose do not match the "
+            "children it launched: kept {}, launched {}".format(
+                sorted(held), sorted(measured["Launched"])))
+
+        # -- no leak: a ceiling on the whole process's handle growth -------
         growth = measured["After"] - measured["Before"]
-        # The lower bound is the retention this code documents: without it the
-        # measurement would be about nothing. The upper bound is what makes it
-        # a guard -- a single unclosed handle per launch lands above it.
-        self.assertGreaterEqual(
-            growth, self.LAUNCHES,
-            "the process handle this launcher keeps on purpose is not being kept "
-            "({} launches, {} more handles)".format(self.LAUNCHES, growth))
         self.assertLessEqual(
             growth, 2 * self.LAUNCHES,
             "the launcher leaked handles: {} launches left {} more handles open, "
             "and it opens five and keeps one".format(self.LAUNCHES, growth))
+
         # And the children really were started and really ended: the count
         # above must not be a count of launches that did nothing.
         for pid in measured["Launched"]:
@@ -4334,11 +4463,6 @@ class UnidentifiedGatewayTests(ScriptTestCase):
     """
 
     STATUS_UNIDENTIFIED = "answering, but it does not identify as a LocalCanvas gateway"
-    START_DETAIL = '       The app will report it as "Not a LocalCanvas server".'
-
-    def start_warning(self):
-        return ("[WARN] Something is answering {} but it does not identify as a "
-                "LocalCanvas gateway.".format(self.gateway_health_url))
 
     def gateway_field(self, output):
         """status.ps1's `Gateway:` field: the address and what was found there."""
@@ -4388,31 +4512,41 @@ class UnidentifiedGatewayTests(ScriptTestCase):
                 self.assertEqual([gateway, said], self.gateway_field(output), output)
                 self.assert_no_stack_trace(output)
 
-    def test_start_warns_that_an_unidentified_answer_does_not_identify(self):
+    def test_start_refuses_an_answer_that_does_not_identify(self):
+        """The stricter contract: such an answer is not readiness at all.
+
+        This used to be a warning printed above "Gateway ready" -- the start
+        went ahead and exited 0. Readiness is now identity-verified
+        (docs/runtime.md, "Machine interface"): an answer is ready only when
+        it identifies as LocalCanvas AND echoes the instance id this start
+        gave the gateway, so each of these shapes is a gateway that did not
+        become ready -- exit 5, the child stopped and its record removed. The
+        real identity is the control.
+        """
         shapes = (
-            ("", "a LocalCanvas gateway's own answer", False),
-            ("1", "another service's JSON object", True),
-            ("html", "a 2xx web page", True),
-            ("empty-object", "{}", True),
+            ("", "a LocalCanvas gateway's own answer", True),
+            ("1", "another service's JSON object", False),
+            ("html", "a 2xx web page", False),
+            ("empty-object", "{}", False),
         )
-        for alien, body, warns in shapes:
+        for alien, body, ready in shapes:
             with self.subTest(body=body):
-                self.write_config()
+                self.write_config(gateway_timeout=3)
                 result = self.run_script(
                     "start.ps1", env=self.script_env(LC_STUB_GATEWAY_ALIEN=alien))
                 output = self.output_of(result)
                 self.assertEqual(0, self.run_script("stop.ps1", timeout=90).returncode)
-                self.assertEqual(0, result.returncode, output)
                 lines = output.splitlines()
-                self.assertIn("[ OK ] Gateway ready", lines, output)
-                if warns:
-                    self.assertIn(self.start_warning(), lines, output)
-                    index = lines.index(self.start_warning())
-                    self.assertEqual(
-                        [self.start_warning(), self.START_DETAIL, "[ OK ] Gateway ready"],
-                        lines[index:index + 3], output)
-                else:
+                if ready:
+                    self.assertEqual(0, result.returncode, output)
+                    self.assertIn("[ OK ] Gateway ready", lines, output)
                     self.assertNotIn("does not identify", output)
+                else:
+                    self.assertEqual(5, result.returncode, output)
+                    self.assertNotIn("[ OK ] Gateway ready", lines, output)
+                    self.assertIn("gateway did not become ready within 3s", output)
+                    self.assertIn("it answered, but not as a LocalCanvas gateway", output)
+                    self.assertIsNone(self.read_pid_file("gateway"))
                 self.assert_no_stack_trace(output)
 
 
@@ -12197,14 +12331,19 @@ class WorkflowSyncTests(ScriptTestCase):
                       "this test scans nothing")
         parameters = re.findall(r"^\s*\[(?:string|switch)\]\$(\w+)", text, re.MULTILINE)
         # RegenerateLabels (T-0116) changes what a run writes into labels and
-        # help, and hides nothing the report prints.
+        # help, and hides nothing the report prints. Json moves the whole
+        # human report to standard error and hides nothing either -- proved
+        # below, not claimed.
         self.assertEqual(
             ["Config", "RuntimeConfig", "PythonExe", "NoConvert", "DryRun",
-             "RegenerateLabels"],
+             "RegenerateLabels", "Json"],
             parameters)
 
         output = self.output_of(self.run_sync())
         self.assertIn("Not exposed: node 4 input 'ckpt_name' [weights_file]", output)
+        machine = self.run_sync("-Json")
+        self.assertIn("Not exposed: node 4 input 'ckpt_name' [weights_file]", machine.stderr)
+        self.assertNotIn("Not exposed:", machine.stdout)
 
     # -- what ComfyUI converted --------------------------------------------
 
@@ -14791,6 +14930,11 @@ PUBLIC_GITIGNORE_RULES = [
     "app/build/",
     "app/android/.gradle/",
     "app/android/local.properties",
+    "launcher/**/bin/",
+    "launcher/**/obj/",
+    "launcher/**/TestResults/",
+    "launcher/dist/",
+    "artifacts/",
     "app/android/key.properties",
     "*.jks",
     "*.keystore",
@@ -15407,7 +15551,7 @@ class PowerShellVersionGateTests(unittest.TestCase):
         below is that hole, held open.
         """
         found = sorted(path.relative_to(REPO).as_posix() for path in powershell_sources())
-        self.assertEqual(sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS), found)
+        self.assertEqual(sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS + MAINTAINER_SCRIPTS), found)
 
     def test_git_is_what_answers_and_it_sees_outside_scripts_and_comfy(self):
         """The list really comes from git, and reaches the repository root.
@@ -15417,20 +15561,32 @@ class PowerShellVersionGateTests(unittest.TestCase):
         walks are not quietly doing the work. Second: git's answer is compared
         with what the walks alone would find, and any tracked .ps1 outside
         scripts/ and comfy/ is shown to be in the first and not the second.
+
+        Most maintainer scripts live outside both directories (launcher/) and
+        are exactly what this half exists to catch; scripts/build-launcher.ps1
+        is a maintainer script that happens to live INSIDE scripts/, so the
+        walk over that directory finds it too -- correctly, since the walk is
+        a superset-by-union, not a guess at which files are maintainer tools.
+        The comparison below therefore expects only the MAINTAINER_SCRIPTS
+        entries the walk genuinely cannot see, not the whole list.
         """
         tracked = tracked_powershell_sources()
         self.assertIsNotNone(
             tracked, "git could not list this checkout, so NOTHING here was verified")
         self.assertEqual(
-            sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS),
+            sorted(ENTRY_SCRIPTS + HELPER_SCRIPTS + MAINTAINER_SCRIPTS),
             sorted(path.relative_to(REPO).as_posix() for path in tracked))
 
         walked = set(powershell_sources_under(SCRIPTS) + comfy_sources())
+        walked_relative = {path.relative_to(REPO).as_posix() for path in walked}
         outside = [path for path in tracked if path not in walked]
-        # None today -- every tracked .ps1 does live under scripts/ or comfy/ --
-        # so the claim that matters is the mechanism, asserted directly: a path
-        # at the root is in git's answer and not in the walks'.
-        self.assertEqual([], outside, "unclassified tracked .ps1 outside the walks")
+        # Every tracked .ps1 the walk cannot see is exactly the MAINTAINER_SCRIPTS
+        # entries that live outside scripts/ and comfy/ -- a path at the root
+        # (below) is one more example of the same thing.
+        self.assertEqual(
+            sorted(name for name in MAINTAINER_SCRIPTS if name not in walked_relative),
+            sorted(path.relative_to(REPO).as_posix() for path in outside),
+            "unclassified tracked .ps1 outside the walks")
         at_the_root = REPO / "a tool at the root.ps1"
         self.assertNotIn(at_the_root, walked)
         self.assertEqual(
@@ -15446,6 +15602,18 @@ class PowerShellVersionGateTests(unittest.TestCase):
         above it has been given a place to put more.
         """
         for name in ENTRY_SCRIPTS:
+            with self.subTest(script=name):
+                text = (REPO / name).read_text(encoding="utf-8-sig")
+                self.assertEqual(ENTRY_SCRIPT_REQUIRES, text.splitlines()[0], name)
+                self.assertEqual(
+                    [ENTRY_SCRIPT_REQUIRES],
+                    [line.strip() for line in text.splitlines()
+                     if re.match(r"(?i)^\s*#requires\b", line)], name)
+
+    def test_every_maintainer_script_carries_the_gate_on_its_very_first_line(self):
+        """The same first-line rule as the entry scripts, for the maintainer tools."""
+        self.assertTrue(MAINTAINER_SCRIPTS, "no maintainer script is listed to check")
+        for name in MAINTAINER_SCRIPTS:
             with self.subTest(script=name):
                 text = (REPO / name).read_text(encoding="utf-8-sig")
                 self.assertEqual(ENTRY_SCRIPT_REQUIRES, text.splitlines()[0], name)
@@ -15728,6 +15896,1163 @@ class PowerShellVersionGateTests(unittest.TestCase):
         # changed its size too, and that difference would prove nothing.
         self.assertNotIn(str(marker), before)
         self.assertIn(str(marker), self.snapshot())
+
+
+class PackageOutputDirectorySafetyTests(unittest.TestCase):
+    """Assert-LcSafeOutputDirectory (launcher\\package.ps1) never deletes an
+    -OutputDirectory it did not make.
+
+    Regression coverage for a real bug: the script used to run
+    ``Remove-Item -LiteralPath $OutputDirectory -Recurse -Force`` before doing
+    anything else, which deletes whatever the caller already had in that
+    folder -- ``-OutputDirectory .`` inside an ordinary populated directory
+    wiped it. This class dot-sources the REAL script (never a copy) and calls
+    its own Assert-LcSafeOutputDirectory directly, so no publish, no staging
+    and no zip has to run for this to be a meaningful check of that function.
+
+    IT DOES NOT, ON ITS OWN, PROVE THE FIX IS WIRED IN. Calling the helper
+    directly cannot tell a script whose RUN PATH stopped calling it (while
+    the helper itself stayed correct and simply went unused) apart from one
+    that calls it -- both answer these tests identically. That gap is closed
+    by PackageOutputDirectoryPipelineTests (the real script, end to end) and
+    PackageScriptDeletionLintTests (a syntax-tree check that the run path
+    really calls this helper, and that no Remove-Item anywhere names anything
+    but $stagingRoot or $zipPath), both below.
+    """
+
+    #: The refusal's own wording (Assert-LcSafeOutputDirectory in
+    #: launcher\package.ps1). Asserted verbatim rather than a bare "it threw":
+    #: on Windows, ``Remove-Item -Recurse -Force .`` against a process's own
+    #: current directory throws too, for an unrelated reason (the directory
+    #: is in use) -- measured, that is genuinely what the OLD, destructive
+    #: code raised for the '.' case below. A test that only checked "threw"
+    #: would have passed against that bug for the wrong reason (T-0182); this
+    #: phrase is the one only the FIXED code's own refusal ever prints.
+    REFUSAL_PHRASE = "and this script did not create it"
+
+    def setUp(self):
+        self.workspace = make_temporary_directory(prefix="lc package outdir ")
+        self.addCleanup(shutil.rmtree, self.workspace, True)
+
+    def run_assert(self, path):
+        """Dot-source package.ps1 and call Assert-LcSafeOutputDirectory -Path $path."""
+        script = (
+            "Set-StrictMode -Version Latest\n"
+            "$ErrorActionPreference = 'Stop'\n"
+            ". '{}'\n"
+            "try {{ Assert-LcSafeOutputDirectory -Path '{}'; Write-Output 'NO_THROW' }}\n"
+            "catch {{ Write-Output ('THROW: ' + $_.Exception.Message) }}\n"
+        ).format(PACKAGE_SCRIPT, path)
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=60, cwd=str(self.workspace),
+        )
+
+    def test_a_pre_populated_folder_it_did_not_create_is_refused_and_survives(self):
+        target = self.workspace / "outdir probe"
+        target.mkdir()
+        note = target / "my-notes.txt"
+        note.write_text("mine", encoding="utf-8")
+        nested = target / "keep me"
+        nested.mkdir()
+        (nested / "x.txt").write_text("also mine", encoding="utf-8")
+
+        result = self.run_assert(str(target))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(self.REFUSAL_PHRASE, result.stdout, result.stdout)
+        self.assertTrue(note.is_file(), "the caller's own file must survive a refusal")
+        self.assertTrue((nested / "x.txt").is_file(), "a nested file must survive too")
+        self.assertEqual("mine", note.read_text(encoding="utf-8"))
+
+    def test_dot_as_output_directory_inside_a_populated_folder_is_refused(self):
+        """The exact shape that was destructive: -OutputDirectory '.'.
+
+        The child process's own working directory IS self.workspace (see
+        run_assert), so '.' here names the same folder the marker file below
+        is planted in -- exactly the shape that used to wipe a real folder.
+        """
+        cwd_marker = self.workspace / "do-not-delete-me.txt"
+        cwd_marker.write_text("still here", encoding="utf-8")
+        result = self.run_assert(".")
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn(self.REFUSAL_PHRASE, result.stdout, result.stdout)
+        self.assertTrue(cwd_marker.is_file(), "the current directory's own files must survive")
+
+    def test_an_empty_or_new_folder_is_claimed_and_reused_without_error(self):
+        target = self.workspace / "fresh"
+        result = self.run_assert(str(target))
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("NO_THROW", result.stdout)
+        marker = target / ".localcanvas-package-output"
+        self.assertTrue(marker.is_file(), "the script must mark a folder it created")
+
+        # A second call against the SAME folder -- now holding only the
+        # marker this script itself wrote -- must be accepted too: an
+        # idempotent second run, not a refusal.
+        result_again = self.run_assert(str(target))
+        self.assertEqual(0, result_again.returncode, result_again.stderr)
+        self.assertIn("NO_THROW", result_again.stdout)
+
+
+class PackageOutputDirectoryPipelineTests(unittest.TestCase):
+    """The REAL launcher\\package.ps1 run path, not just its helper function.
+
+    PackageOutputDirectorySafetyTests above dot-sources the script and calls
+    Assert-LcSafeOutputDirectory directly -- which cannot tell a script whose
+    run path quietly stopped calling that helper (while the helper itself
+    stayed correct and simply went unused) apart from one that calls it
+    correctly: both answer that class's tests identically. This class runs
+    `pwsh -File launcher\\package.ps1 -SkipPublish` for real, so what is
+    measured is the run path itself.
+
+    -SkipPublish needs a publish output already at
+    launcher\\LocalCanvas.Launcher\\bin\\publish\\win-x64\\LocalCanvas.exe. A
+    real one, left by an earlier `dotnet publish`, is used untouched and
+    unmodified; only when none is there does this class write a small stub
+    file for the duration of one test and remove exactly that stub
+    afterward -- never a real build artefact, and never a rebuild.
+
+    Cleanup does two things narrowly, on purpose, because getting either
+    wrong is a real hazard rather than a cosmetic one: it deletes the file at
+    that fixed, gitignored path only if its bytes still equal the stub this
+    test wrote (a `dotnet publish`, or a second suite run in the same
+    worktree, landing in the same window must never lose its own real exe to
+    this cleanup); and it removes only the ancestor directories this test
+    itself created -- recorded in setUp, before anything is made -- never one
+    that already existed.
+    """
+
+    PUBLISH_DIRECTORY = LAUNCHER / "LocalCanvas.Launcher" / "bin" / "publish" / "win-x64"
+    PUBLISHED_EXE = PUBLISH_DIRECTORY / "LocalCanvas.exe"
+    STUB_BYTES = (
+        b"stub written only for PackageOutputDirectoryPipelineTests; "
+        b"not a real executable."
+    )
+
+    def setUp(self):
+        self.workspace = make_temporary_directory(prefix="lc package pipeline ")
+        self.addCleanup(shutil.rmtree, self.workspace, True)
+        self.stub_written = False
+        self.created_directories = []
+        if not self.PUBLISHED_EXE.is_file():
+            # Deepest first: every ancestor of PUBLISH_DIRECTORY that does
+            # not exist YET, stopping at the first one that does -- exactly
+            # what this test is about to create, and the only directories
+            # its own cleanup may ever remove.
+            directory = self.PUBLISH_DIRECTORY
+            while not directory.exists():
+                self.created_directories.append(directory)
+                directory = directory.parent
+            self.PUBLISH_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            self.PUBLISHED_EXE.write_bytes(self.STUB_BYTES)
+            self.stub_written = True
+            self.addCleanup(self.remove_stub)
+
+    def remove_stub(self):
+        if self.stub_written and self.PUBLISHED_EXE.is_file():
+            try:
+                current_bytes = self.PUBLISHED_EXE.read_bytes()
+            except OSError:
+                current_bytes = None
+            # Only ever the exact bytes this setUp wrote -- a real publish
+            # (or another run of this same class) landing here in the
+            # meantime is left completely alone, real exe and all.
+            if current_bytes == self.STUB_BYTES:
+                self.PUBLISHED_EXE.unlink()
+        for directory in self.created_directories:
+            try:
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass
+
+    def run_package(self, output_directory):
+        """`pwsh -File launcher\\package.ps1 -OutputDirectory <it> -SkipPublish`.
+
+        -AllowDirty: this runs against the checkout this suite itself is
+        part of, which this very test file may be editing -- the clean-tree
+        gate is not what any test here is about.
+        """
+        return subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-File", str(PACKAGE_SCRIPT),
+             "-OutputDirectory", str(output_directory), "-SkipPublish", "-AllowDirty"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=120, cwd=str(REPO),
+        )
+
+    def test_a_pre_populated_folder_survives_the_real_run_path(self):
+        target = self.workspace / "outdir probe"
+        target.mkdir()
+        note = target / "my-notes.txt"
+        note.write_text("mine", encoding="utf-8")
+        nested = target / "keep me"
+        nested.mkdir()
+        (nested / "x.txt").write_text("also mine", encoding="utf-8")
+
+        result = self.run_package(target)
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertIn("and this script did not create it", output, output)
+        self.assertTrue(note.is_file(), "the caller's own file must survive a refusal")
+        self.assertEqual("mine", note.read_text(encoding="utf-8"))
+        self.assertTrue((nested / "x.txt").is_file(), "a nested file must survive too")
+
+    def test_dot_as_output_directory_survives_the_real_run_path(self):
+        """The same shape as above, through `-OutputDirectory .`."""
+        cwd_marker = self.workspace / "do-not-delete-me.txt"
+        cwd_marker.write_text("still here", encoding="utf-8")
+        result = subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-File", str(PACKAGE_SCRIPT),
+             "-OutputDirectory", ".", "-SkipPublish", "-AllowDirty"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=120, cwd=str(self.workspace),
+        )
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertIn("and this script did not create it", output, output)
+        self.assertTrue(cwd_marker.is_file(), "the current directory's own files must survive")
+
+    def test_a_fresh_folder_is_packaged_successfully(self):
+        """The positive case: the run path really does produce a zip."""
+        target = self.workspace / "fresh"
+        result = self.run_package(target)
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        zips = list(target.glob("LocalCanvas-*-windows-x64.zip"))
+        self.assertEqual(1, len(zips), output)
+        self.assertTrue((target / ".localcanvas-package-output").is_file())
+        self.assertFalse((target / "staging").exists(),
+                          "the staging folder must not survive a successful run")
+
+
+class PackageScriptDeletionLintTests(unittest.TestCase):
+    """A syntax-tree guard over launcher\\package.ps1's own deletions.
+
+    Reads the script's own AST rather than running it, which is what closes
+    the gap PackageOutputDirectoryPipelineTests' functional runs cannot on
+    their own generalise past the exact mutation they were built against:
+    every deletion anywhere in the file -- Remove-Item under any alias or
+    module qualifier, and every .NET Delete/Move member call -- names only
+    $stagingRoot or $zipPath as its target, never $OutputDirectory and never
+    a bare -Path; and the one call to Assert-LcSafeOutputDirectory in the run
+    path (outside any function) precedes the first write there.
+
+    Matching the literal string 'Remove-Item' and only CommandAst nodes, as
+    an earlier version of this class did, misses a call written as one of
+    its own aliases (rm, del, ri, rd, erase, rmdir), one written
+    module-qualified (Microsoft.PowerShell.Management\\Remove-Item), and any
+    .NET delete or move -- [System.IO.Directory]::Delete(...) is a member
+    invocation, not a command, and never shows up as a CommandAst at all.
+    Both gaps are closed below, and test_the_scan_recognises_a_planted_alias_
+    and_a_planted_net_delete proves this scan actually notices a planted
+    example of each -- inertly, inside an `if ($false)` that can never run --
+    rather than trusting that it would.
+    """
+
+    ALLOWED_LITERAL_PATH_TARGETS = ("$stagingRoot", "$zipPath")
+
+    #: Both pwsh's own AST classes and the traversal are read fresh from the
+    #: file every time this runs, through -Command rather than a helper
+    #: script on disk: the check is that TARGET file's structure, and nothing
+    #: here should need a second file to stay in step with it.
+    SCAN_SCRIPT = """
+$path = $env:LC_PACKAGE_LINT_PATH
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$parseErrors)
+
+function Get-EnclosingFunctionName {
+    param($Node)
+    $at = $Node.Parent
+    while ($null -ne $at) {
+        if ($at -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $at.Name }
+        $at = $at.Parent
+    }
+    return ''
+}
+
+function Resolve-ToCommandName {
+    <#
+        The command a call site actually runs, past an alias and past a
+        module qualifier: 'rm', 'ri', 'rd', 'del', 'erase', 'rmdir' and
+        'Microsoft.PowerShell.Management\Remove-Item' all resolve to
+        'Remove-Item' here.
+
+        Hops through .Definition, a STRING, rather than .ResolvedCommand, an
+        AliasInfo's own object reference to the command it points to: for a
+        built-in alias like 'rm', measured, .ResolvedCommand is $null even
+        though .Definition correctly reads 'Remove-Item' -- so a walk that
+        only ever followed .ResolvedCommand (as the WMI call-site lint
+        elsewhere in this file does, for its own, narrower set of aliases)
+        would silently stop at the first hop for exactly the built-in
+        aliases this check most needs to see through.
+
+        The backslash a module-qualified name carries is looked for with
+        String.Contains/LastIndexOf against a literal character, not a
+        regular expression: '\' alone is not a valid pattern for -match (an
+        unescaped backslash at the end of a regex is illegal), so a version
+        of this written with -match here would throw on every call, aliased
+        module-qualified or not, and still (by accident, since the illegal
+        pattern always fails the same way) count as "no backslash found."
+    #>
+    param([string]$Written)
+    if (-not $Written) { return $Written }
+    $separator = [char]92
+    $bare = $Written
+    if ($bare.Contains($separator)) { $bare = $bare.Substring($bare.LastIndexOf($separator) + 1) }
+    $command = $null
+    try { $command = Get-Command -Name $Written -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    if (-not $command -and $bare -ne $Written) {
+        try { $command = Get-Command -Name $bare -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    }
+    $hops = 0
+    while ($command -and $command.CommandType -eq 'Alias' -and $hops -lt 8) {
+        $next = $command.Definition
+        if (-not $next) { break }
+        $following = $null
+        try { $following = Get-Command -Name $next -ErrorAction Stop | Select-Object -First 1 } catch { $following = $null }
+        if (-not $following) { return $next }
+        $command = $following
+        $hops++
+    }
+    if ($command) { return $command.Name }
+    return $bare
+}
+
+$writeCommandNames = @('New-Item', 'Remove-Item', 'Copy-Item', 'Set-Content')
+$removeItems = @()
+$writes = @()
+$assertCalls = @()
+
+foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+    $written = $command.GetCommandName()
+    if (-not $written) { continue }
+    $resolved = Resolve-ToCommandName -Written $written
+    $enclosing = Get-EnclosingFunctionName -Node $command
+    $elements = $command.CommandElements
+
+    if ($resolved -eq 'Remove-Item') {
+        $literalPathText = $null
+        $usedPathInstead = $false
+        for ($i = 1; $i -lt $elements.Count; $i++) {
+            $element = $elements[$i]
+            if ($element -is [System.Management.Automation.Language.CommandParameterAst]) {
+                if ($element.ParameterName -eq 'LiteralPath') {
+                    if ($element.Argument) { $literalPathText = $element.Argument.Extent.Text.Trim() }
+                    elseif ($i + 1 -lt $elements.Count) { $literalPathText = $elements[$i + 1].Extent.Text.Trim() }
+                } elseif ($element.ParameterName -eq 'Path') {
+                    $usedPathInstead = $true
+                }
+            }
+        }
+        $removeItems += [pscustomobject]@{
+            line = $command.Extent.StartLineNumber
+            enclosingFunction = $enclosing
+            writtenAs = $written
+            literalPathText = $literalPathText
+            usedPathInstead = $usedPathInstead
+            text = $command.Extent.Text
+        }
+    }
+
+    # $resolved, not $written: a write reached through an alias must still
+    # count as that write for the ordering check below.
+    if ($enclosing -eq '' -and $writeCommandNames -contains $resolved) {
+        $writes += [pscustomobject]@{ line = $command.Extent.StartLineNumber; name = $resolved }
+    }
+    if ($enclosing -eq '' -and $resolved -eq 'Assert-LcSafeOutputDirectory') {
+        $assertCalls += [pscustomobject]@{ line = $command.Extent.StartLineNumber; text = $command.Extent.Text }
+    }
+}
+
+# .NET deletions and moves never appear as a CommandAst at all -- they are
+# member-invocation EXPRESSIONS ([System.IO.Directory]::Delete(...), or an
+# instance's own .Delete()/.Move()) -- so the command-name walk above,
+# however thorough, could never see them. Every one anywhere in the file
+# (position and enclosing function do not matter here: this is the same
+# file-wide "never anything but the two safe names" rule the Remove-Item
+# check above applies) is recorded so the tests below can name its target.
+$deleteOrMoveTypeNames = @(
+    'Directory', 'File', 'DirectoryInfo', 'FileInfo',
+    'IO.Directory', 'IO.File', 'IO.DirectoryInfo', 'IO.FileInfo',
+    'System.IO.Directory', 'System.IO.File', 'System.IO.DirectoryInfo', 'System.IO.FileInfo'
+)
+$memberDeletes = @()
+foreach ($member in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+    $memberName = "$($member.Member.Value)"
+    if ($memberName -notin @('Delete', 'Move')) { continue }
+    $enclosing = Get-EnclosingFunctionName -Node $member
+    $isRelevantType = $false
+    $targetText = $null
+    if ($member.Static) {
+        $typeName = "$($member.Expression.TypeName.FullName)"
+        if ($deleteOrMoveTypeNames -contains $typeName) { $isRelevantType = $true }
+        if ($member.Arguments -and $member.Arguments.Count -gt 0) {
+            $targetText = $member.Arguments[0].Extent.Text.Trim()
+        }
+    } else {
+        # Instance call: every instance .Delete()/.Move() is treated as
+        # relevant regardless of the object's declared type -- this script
+        # has none today, so being strict here costs nothing and closes the
+        # door on a future one going unnoticed for want of type inference.
+        $isRelevantType = $true
+        $targetText = $member.Expression.Extent.Text.Trim()
+    }
+    if (-not $isRelevantType) { continue }
+    $memberDeletes += [pscustomobject]@{
+        line = $member.Extent.StartLineNumber
+        enclosingFunction = $enclosing
+        static = [bool]$member.Static
+        member = $memberName
+        targetText = $targetText
+        text = $member.Extent.Text
+    }
+}
+
+$sortedWrites = @($writes | Sort-Object line)
+$firstTopLevelWriteLine = $null
+if ($sortedWrites.Count -gt 0) { $firstTopLevelWriteLine = $sortedWrites[0].line }
+
+[pscustomobject]@{
+    removeItems = @($removeItems)
+    memberDeletes = @($memberDeletes)
+    firstTopLevelWriteLine = $firstTopLevelWriteLine
+    topLevelAssertCalls = @($assertCalls | Sort-Object line)
+} | ConvertTo-Json -Depth 4 -Compress
+"""
+
+    def scan(self, path=None):
+        env = dict(os.environ)
+        env["LC_PACKAGE_LINT_PATH"] = str(path if path is not None else PACKAGE_SCRIPT)
+        result = subprocess.run(
+            [PWSH, "-NoProfile", "-NonInteractive", "-Command", self.SCAN_SCRIPT],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=60, env=env, cwd=str(REPO), stdin=subprocess.DEVNULL)
+        if result.returncode != 0:
+            raise AssertionError("the syntax-tree scan failed:\n" +
+                                  (result.stdout or "") + (result.stderr or ""))
+        return json.loads(result.stdout)
+
+    def remove_item_offenders(self, result):
+        offenders = []
+        for item in result["removeItems"]:
+            where = "line {} ({}): {}".format(
+                item["line"], item["enclosingFunction"] or "the run path", item["text"])
+            if item["usedPathInstead"]:
+                offenders.append(where + " -- uses -Path, not -LiteralPath")
+                continue
+            if item["literalPathText"] not in self.ALLOWED_LITERAL_PATH_TARGETS:
+                offenders.append(where + " -- -LiteralPath {} is not $stagingRoot or $zipPath".format(
+                    item["literalPathText"]))
+        return offenders
+
+    def member_delete_offenders(self, result):
+        offenders = []
+        for item in result["memberDeletes"]:
+            where = "line {} ({}): {}".format(
+                item["line"], item["enclosingFunction"] or "the run path", item["text"])
+            if item["targetText"] not in self.ALLOWED_LITERAL_PATH_TARGETS:
+                offenders.append(where + " -- .{} target {} is not $stagingRoot or $zipPath".format(
+                    item["member"], item["targetText"]))
+        return offenders
+
+    def test_every_remove_item_targets_only_staging_or_the_zip_by_literal_path(self):
+        result = self.scan()
+        self.assertEqual([], self.remove_item_offenders(result), self.remove_item_offenders(result))
+
+    def test_every_net_delete_or_move_targets_only_staging_or_the_zip(self):
+        result = self.scan()
+        self.assertEqual([], self.member_delete_offenders(result), self.member_delete_offenders(result))
+
+    def test_the_ownership_check_runs_before_the_first_top_level_write(self):
+        result = self.scan()
+        calls = result["topLevelAssertCalls"]
+        self.assertEqual(
+            1, len(calls),
+            "expected exactly one run-path call to Assert-LcSafeOutputDirectory, found {}: {}".format(
+                len(calls), calls))
+        first_write_line = result["firstTopLevelWriteLine"]
+        self.assertIsNotNone(first_write_line, "no top-level write command was found at all")
+        self.assertLess(
+            calls[0]["line"], first_write_line,
+            "Assert-LcSafeOutputDirectory (line {}) must run before the first top-level write (line {})".format(
+                calls[0]["line"], first_write_line))
+
+    def test_the_scan_recognises_a_planted_alias_and_a_planted_net_delete(self):
+        """The self-check: plant both forms inertly and confirm the scan sees them.
+
+        Everything below sits inside `if ($false) { ... }`, so nothing here
+        ever runs -- proving the SCAN notices these shapes is the only point,
+        never exercising what they would do. Without this, a scan that
+        quietly stopped resolving aliases (or stopped looking for member
+        deletes at all) would report a clean bill of health for the wrong
+        reason: nothing left to find, rather than nothing there to find.
+        """
+        fixture_directory = make_temporary_directory(prefix="lc package lint fixture ")
+        self.addCleanup(shutil.rmtree, fixture_directory, True)
+        fixture = fixture_directory / "planted.ps1"
+        fixture.write_text(
+            "# Deliberately unreachable -- proves the scan sees these forms,\n"
+            "# never that they run.\n"
+            "if ($false) {\n"
+            "    rm -LiteralPath $OutputDirectory -Recurse -Force\n"
+            "    Microsoft.PowerShell.Management\\Remove-Item -LiteralPath $OutputDirectory -Recurse -Force\n"
+            "    [System.IO.Directory]::Delete($OutputDirectory, $true)\n"
+            "}\n",
+            encoding="utf-8")
+        result = self.scan(fixture)
+        remove_item_offenders = self.remove_item_offenders(result)
+        member_offenders = self.member_delete_offenders(result)
+        self.assertEqual(2, len(remove_item_offenders),
+                          "expected the alias (rm) and the module-qualified call to both be "
+                          "flagged: {}".format(remove_item_offenders))
+        self.assertEqual(1, len(member_offenders),
+                          "expected the planted [System.IO.Directory]::Delete to be flagged: {}".format(
+                              member_offenders))
+        # And the real script, scanned by the same mechanism, still reports none.
+        self.assertEqual([], self.remove_item_offenders(self.scan()))
+        self.assertEqual([], self.member_delete_offenders(self.scan()))
+
+
+class BuildLauncherScriptLintTests(unittest.TestCase):
+    """Static checks over scripts\\build-launcher.ps1's own text.
+
+    This is NOT a second launcher, and it must never grow into one: it shares
+    launcher\\package.ps1's allowlist, version reader and publish step
+    (Invoke-LcLauncherPublish) rather than keeping its own copy, it publishes
+    the SAME win-x64 profile the release zip uses, and it never signs, and
+    never touches Smart App Control, Defender or any machine policy -- the
+    developer decisions this card must not reopen. Reading the file's own
+    text catches a regression the functional tests below cannot generalise
+    past: a mutation that adds a second, unused definition, or a call to one
+    of the forbidden tools placed somewhere a functional run never exercises.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.text = BUILD_LAUNCHER_SCRIPT.read_text(encoding="utf-8-sig")
+
+    def test_the_gate_is_the_very_first_line(self):
+        self.assertEqual(ENTRY_SCRIPT_REQUIRES, self.text.splitlines()[0])
+
+    def test_it_is_a_maintainer_script_not_an_entry_script(self):
+        # ENTRY_SCRIPT_BANNER ("LocalCanvas") is not a useful string to look
+        # for here: this script's whole subject is building LocalCanvas, so
+        # the word appears constantly in ordinary prose. What actually
+        # decides "maintainer, not entry" is the two lists themselves.
+        self.assertIn("scripts/build-launcher.ps1", MAINTAINER_SCRIPTS)
+        self.assertNotIn("scripts/build-launcher.ps1", ENTRY_SCRIPTS)
+
+    def test_it_reuses_package_ps1_and_defines_none_of_the_shared_functions_itself(self):
+        """No duplicated allowlist, version reader or publish step.
+
+        The brief is explicit that this script must reuse launcher\\package.ps1
+        rather than copy its logic. Checked two ways: the dot-source call is
+        present, and none of the four functions that call defines is
+        redefined here (a copy that silently drifted from the original is
+        exactly what "one allowlist, one publish step" is meant to prevent).
+        """
+        self.assertIn("launcher\\package.ps1", self.text)
+        self.assertRegex(self.text, r"(?m)^\s*\.\s*\(Join-Path \$repoRoot 'launcher\\package\.ps1'\)")
+        for name in (
+            "Test-LcPackageEntryAllowed", "Test-LcPackageEntryForbidden",
+            "Get-LcPackageVersion", "Invoke-LcLauncherPublish",
+        ):
+            with self.subTest(function=name):
+                self.assertNotRegex(
+                    self.text, r"(?im)^\s*function\s+{}\b".format(re.escape(name)),
+                    "{} must not be redefined here -- it is dot-sourced from package.ps1".format(name))
+
+    def test_it_never_overrides_the_release_publish_profile(self):
+        """The exact same win-x64, self-contained, single-file profile.
+
+        Invoke-LcLauncherPublish (package.ps1) is the only place
+        '-p:PublishProfile' is set; this script must never pass a competing
+        one, nor override RuntimeIdentifier or SelfContained itself -- doing
+        so would make the dev exe behave differently from the release one,
+        which the developer instruction forbids.
+        """
+        self.assertNotIn("PublishProfile=", self.text)
+        self.assertNotIn("-p:RuntimeIdentifier", self.text)
+        self.assertNotIn("-p:SelfContained", self.text)
+
+    def test_it_never_attempts_to_sign_anything(self):
+        lowered = self.text.lower()
+        for forbidden in ("signtool", "set-authenticodesignature", "authenticode"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+
+    def test_it_never_touches_smart_app_control_defender_or_any_machine_policy(self):
+        """Developer decisions this card must not reopen, held as a lint.
+
+        Read-only OBSERVATION of Smart App Control after a build is a
+        separate, manual step (see the brief) and is deliberately not part of
+        this script at all -- so none of these strings has any business
+        appearing here, not even in a comment.
+        """
+        lowered = self.text.lower()
+        forbidden_substrings = (
+            "set-mppreference", "set-executionpolicy", "set-netfirewallprofile",
+            "set-netfirewallrule", "disable-netfirewallrule", "set-cipolicy",
+            "verifiedandreputablepolicystate", "unblock-file",
+        )
+        for forbidden in forbidden_substrings:
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, lowered)
+        self.assertNotIn("Smart App Control", self.text)
+
+    def test_it_never_kills_or_signals_a_process_and_run_is_a_plain_start(self):
+        """-Run starts a process and does nothing else to any process.
+
+        ProcessOwnershipLintTests already scans every tracked .ps1, including
+        this one, for a process addressed by anything but its own PID -- this
+        adds the narrower, script-specific claim the brief makes: -Run itself
+        is a plain Start-Process, with no -Wait and nothing that could stop or
+        signal an existing instance.
+        """
+        self.assertNotIn("Stop-Process", self.text)
+        self.assertNotIn("Get-Process", self.text)
+        self.assertIn("Start-Process", self.text)
+        # Real call sites only: "Start-Process -FilePath ..." -- not the
+        # comment-block prose above that also mentions the cmdlet by name
+        # ("a plain Start-Process, no -Wait"), which is not followed by a
+        # parameter and so never matches this stricter pattern.
+        call_sites = re.findall(r"(?m)^\s*Start-Process\s+-.*$", self.text)
+        self.assertGreater(len(call_sites), 0, "no real Start-Process call site found")
+        for line in call_sites:
+            with self.subTest(line=line):
+                self.assertNotIn("-Wait", line)
+
+    def test_it_names_no_developer_specific_absolute_path(self):
+        """Every path is built from $PSScriptRoot / $repoRoot, never hard-coded.
+
+        A drive-letter path (``C:\\...``) anywhere in the file would be a
+        specific machine's layout leaking into a script every clone runs --
+        exactly what AGENTS.md section C forbids. None is expected, in code
+        or in a comment.
+        """
+        hits = re.findall(r"[A-Za-z]:\\\\?[^\s'\"]*", self.text)
+        self.assertEqual([], hits)
+
+    def test_it_computes_the_repository_root_from_its_own_location(self):
+        self.assertIn("$PSScriptRoot", self.text)
+        self.assertRegex(self.text, r"\$repoRoot\s*=\s*\(Resolve-Path \(Join-Path \$PSScriptRoot '\.\.'\)\)")
+
+
+class BuildLauncherPipelineTests(unittest.TestCase):
+    """The REAL scripts\\build-launcher.ps1, run end to end.
+
+    Every test in this class points the script at its OWN throwaway
+    temporary directory via -OutputRootPathForTests, never at the real
+    repository's own artifacts\\dev -- that is the developer's actual
+    dogfood folder once they have used this script for real (their .venv,
+    config\\local content and .runtime), and a suite that builds, rebuilds
+    and cleans up there would build, rebuild and clean up THAT -- a real
+    regression this class once had: a planted .runtime\\x, a real
+    config\\local\\runtime.yaml and LocalCanvas.exe itself were all found
+    gone afterwards, once measured against a real dogfood folder.
+
+    test_the_real_output_root_is_never_referenced_here (below) is the
+    guard: every call this class makes to the real script goes through
+    build_launcher_arguments, the ONE place -OutputRootPathForTests is
+    supplied, and the guard proves that is the only place BUILD_LAUNCHER_
+    SCRIPT's own path appears in this class's source at all.
+
+    Also never a real self-contained publish unless a test says so
+    explicitly (most use -SkipPublish with a small stub exe, exactly as
+    PackageOutputDirectoryPipelineTests does for launcher\\package.ps1, so
+    that most of this class stays fast) -- and that stub now lives at this
+    script's OWN, dev-only publish directory (win-x64-dev), never
+    launcher\\package.ps1's own win-x64\\: the two scripts must never be
+    able to pick up each other's published exe under -SkipPublish.
+    """
+
+    STUB_BYTES = (
+        b"stub written only for BuildLauncherPipelineTests; "
+        b"not a real executable."
+    )
+    PUBLISH_DIRECTORY = LAUNCHER / "LocalCanvas.Launcher" / "bin" / "publish" / "win-x64-dev"
+    PUBLISHED_EXE = PUBLISH_DIRECTORY / "LocalCanvas.exe"
+
+    def setUp(self):
+        self.stub_written = False
+        self.created_directories = []
+        if not self.PUBLISHED_EXE.is_file():
+            directory = self.PUBLISH_DIRECTORY
+            while not directory.exists():
+                self.created_directories.append(directory)
+                directory = directory.parent
+            self.PUBLISH_DIRECTORY.mkdir(parents=True, exist_ok=True)
+            self.PUBLISHED_EXE.write_bytes(self.STUB_BYTES)
+            self.stub_written = True
+            self.addCleanup(self.remove_stub)
+        # This test's own throwaway output root -- never the real
+        # repository's artifacts\dev. Removed unconditionally afterward:
+        # nothing a real user would ever have lives here, because nothing
+        # outside this class's own runs ever pointed the script at it.
+        self.output_root = make_temporary_directory(prefix="lc build launcher output ")
+        self.addCleanup(shutil.rmtree, self.output_root, True)
+
+    def remove_stub(self):
+        if self.stub_written and self.PUBLISHED_EXE.is_file():
+            try:
+                current_bytes = self.PUBLISHED_EXE.read_bytes()
+            except OSError:
+                current_bytes = None
+            # Only ever the exact bytes this setUp wrote -- a real publish (or
+            # another run of this same class) landing here in the meantime is
+            # left completely alone, real exe and all.
+            if current_bytes == self.STUB_BYTES:
+                self.PUBLISHED_EXE.unlink()
+        for directory in self.created_directories:
+            try:
+                if directory.is_dir() and not any(directory.iterdir()):
+                    directory.rmdir()
+            except OSError:
+                pass
+
+    def build_launcher_arguments(self, *extra_args, skip_publish=True):
+        """Every argv this class ever passes to the real script, in ONE place.
+
+        -OutputRootPathForTests always names THIS test's own self.output_root,
+        never the real repository's own artifacts\\dev -- the single call
+        site test_the_real_output_root_is_never_referenced_here checks for.
+        """
+        arguments = [
+            PWSH, "-NoProfile", "-NonInteractive", "-File", str(BUILD_LAUNCHER_SCRIPT),
+            "-OutputRootPathForTests", str(self.output_root),
+        ]
+        if skip_publish:
+            arguments.append("-SkipPublish")
+        arguments.extend(extra_args)
+        return arguments
+
+    def run_build(self, *extra_args, timeout=120, skip_publish=True):
+        return subprocess.run(
+            self.build_launcher_arguments(*extra_args, skip_publish=skip_publish),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=timeout, cwd=str(REPO),
+        )
+
+    def dev_output(self):
+        return self.output_root / "LocalCanvas"
+
+    def test_the_real_output_root_is_never_referenced_here(self):
+        """R1's guard, widened past this one class to the WHOLE file.
+
+        Deliberately NOT "plant a marker in the real artifacts\\dev and
+        check it survives": a probe that reaches into that real folder at
+        all is another script with the same class of risk R1 fixes, and on
+        a developer's own machine (as opposed to a clean CI checkout) that
+        folder already holds real, live state. Reading this file's own
+        source is a check that touches no real path whatsoever.
+
+        A version of this guard scoped to only this one class could not see
+        a second class, a module-level helper, or a literal
+        SCRIPTS / "build-launcher.ps1" built fresh anywhere else in the
+        file -- all would bypass it, and the script's own default is still
+        the real folder. So this reads every function definition in the
+        WHOLE MODULE (ast.walk, not just this class's own methods).
+
+        The operative word in "must go through the one helper" is RUNS: a
+        function that merely NAMES the script -- BuildLauncherScriptLintTests
+        reading its text to lint it, or PowerShellVersionGateTests checking
+        that it is correctly listed in MAINTAINER_SCRIPTS -- never executes
+        anything and has no seam to bypass, so it is not an offender. What
+        marks a function as actually running something is calling
+        ``subprocess`` at all; every function that both names the script AND
+        calls subprocess must be build_launcher_arguments itself.
+
+        Checked by function, not as one string count over the whole file:
+        this very test's own source has to name what it is checking, so it
+        excludes itself by name rather than by a count that would see its
+        own line as a second offending call site.
+        """
+        this_test = "test_the_real_output_root_is_never_referenced_here"
+        helper = "build_launcher_arguments"
+        text = (HERE / "run_tests.py").read_text(encoding="utf-8-sig")
+        tree = ast.parse(text)
+        # Split ONCE: ast.get_source_segment re-splits the whole file on
+        # every single call, which is fine for a one-off lookup but turns
+        # into minutes of wall clock time called once per function
+        # definition over a file this size (measured: ~1250 functions,
+        # ~500s). Slicing the same pre-split lines by each node's own
+        # lineno/end_lineno is the same text, computed once.
+        lines = text.splitlines(keepends=True)
+
+        def source_of(node):
+            start = node.lineno - 1
+            end = getattr(node, "end_lineno", node.lineno) - 1
+            return "".join(lines[start:end + 1])
+
+        found_helper = False
+        offenders = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name == this_test:
+                continue
+            function_source = source_of(node)
+            mentions_script_path = (
+                "BUILD_LAUNCHER_SCRIPT" in function_source or
+                "build-launcher.ps1" in function_source.lower())
+            if not mentions_script_path:
+                continue
+            if node.name == helper:
+                found_helper = True
+                self.assertIn("OutputRootPathForTests", function_source, function_source)
+                continue
+            if "subprocess." not in function_source:
+                # Names the script but never runs anything -- a text lint or
+                # a membership check, not a call site the seam applies to.
+                continue
+            offenders.append(node.name)
+        self.assertTrue(found_helper, "the one call-building helper itself was not found")
+        self.assertEqual(
+            [], offenders,
+            "these name the script AND call subprocess, so they must go through {}, "
+            "never build their own argv: {}".format(helper, offenders))
+
+    def snapshot(self, root):
+        """Every file under ``root``, by relative path, with its own SHA-256.
+
+        Used to prove a failed build left a PREVIOUS successful build's
+        output byte-for-byte alone -- a size-only check would miss a file
+        quietly rewritten with different, same-length content.
+        """
+        if not root.exists():
+            return {}
+        found = {}
+        for path in sorted(root.rglob("*")):
+            if path.is_dir():
+                continue
+            relative = path.relative_to(root).as_posix()
+            found[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return found
+
+    def test_a_successful_build_produces_the_expected_layout(self):
+        """Tests 1-5: one command, a stable path, the exe, and no side effect
+        on any tracked file."""
+        before = tracked_status(REPO)
+        result = self.run_build()
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("LocalCanvas developer build ready:", output)
+        expected_relative_exe = str(Path("artifacts") / "dev" / "LocalCanvas" / "LocalCanvas.exe")
+        self.assertIn(expected_relative_exe, output)
+
+        exe = self.dev_output() / "LocalCanvas.exe"
+        self.assertTrue(exe.is_file(), output)
+        # Whatever the shared publish step produced -- the stub this class
+        # writes when nothing real is there, or a real exe another test (or
+        # an earlier `dotnet publish` in this worktree) already left behind
+        # -- the staged exe must be that SAME file, copied byte for byte,
+        # never re-encoded or replaced by anything else.
+        self.assertEqual(self.PUBLISHED_EXE.read_bytes(), exe.read_bytes(),
+                          "the staged exe must be the exact bytes the shared publish step wrote")
+
+        manifest_path = self.dev_output() / ".localcanvas-dev-build-manifest.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertIn("LocalCanvas.exe", manifest["owned_files"])
+        self.assertIn("scripts\\setup.ps1", manifest["owned_files"])
+
+        build_info_path = self.dev_output() / "build-info.json"
+        self.assertTrue(build_info_path.is_file())
+        build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            {"version", "source", "dirty", "configuration", "built_utc"}, set(build_info.keys()))
+        self.assertEqual("Release", build_info["configuration"])
+        self.assertRegex(build_info["source"], r"^[0-9a-f]{4,40}$")
+
+        after = tracked_status(REPO)
+        self.assertEqual(before, after, "a build must never modify a tracked file")
+
+    def test_the_output_path_is_stable_across_rebuilds(self):
+        """Test 2: the exe always lands at the same repo-relative path."""
+        expected_relative_exe = str(Path("artifacts") / "dev" / "LocalCanvas" / "LocalCanvas.exe")
+        for _ in range(2):
+            result = self.run_build()
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+            self.assertIn(expected_relative_exe, result.stdout)
+            self.assertTrue((self.dev_output() / "LocalCanvas.exe").is_file())
+
+    def test_a_forced_publish_failure_leaves_the_previous_output_untouched(self):
+        """Test 6: a real compile failure, on a throwaway copy, never the
+        real launcher sources -- proves stale-build protection end to end."""
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        before = self.snapshot(self.dev_output())
+        self.assertIn("LocalCanvas.exe", before, "nothing to protect if the first build did not succeed")
+
+        broken_project = make_temporary_directory(prefix="lc build launcher broken ")
+        self.addCleanup(shutil.rmtree, broken_project, True)
+        (broken_project / "broken.csproj").write_text(
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n"
+            "  <PropertyGroup>\n"
+            "    <OutputType>Exe</OutputType>\n"
+            "    <TargetFramework>net10.0</TargetFramework>\n"
+            "  </PropertyGroup>\n"
+            "</Project>\n",
+            encoding="utf-8")
+        (broken_project / "Program.cs").write_text(
+            "this is not valid C# @@@ -- a deliberate, forced compile failure\n",
+            encoding="utf-8")
+
+        result = subprocess.run(
+            self.build_launcher_arguments(
+                "-LauncherProjectPathForTests", str(broken_project), skip_publish=False),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=180, cwd=str(REPO))
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertNotIn("developer build ready", output)
+        after = self.snapshot(self.dev_output())
+        self.assertEqual(before, after,
+                          "a failed build must leave the previous output byte-for-byte untouched")
+
+    def test_run_starts_the_built_exe_through_the_seam_and_never_waits(self):
+        """Test 11: -Run, and single instance is entirely the exe's own business."""
+        workspace = make_temporary_directory(prefix="lc build launcher run ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        stub_target = workspace / "run target.cmd"
+        stub_target.write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+        started_at = time.monotonic()
+        result = self.run_build("-Run", "-RunStartPathForTests", str(stub_target))
+        elapsed = time.monotonic() - started_at
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("Starting: " + str(stub_target), output)
+        # "No waiting": Start-Process without -Wait returns immediately, so
+        # the whole build+run finishes in a few seconds, never anywhere near
+        # how long a real launcher's own tray lifecycle would take to exit.
+        self.assertLess(elapsed, 30, "the run took long enough to suggest something waited")
+
+    def test_a_rebuild_preserves_owner_state_and_removes_only_stale_owned_files(self):
+        """Test 12: .venv, config\\local\\* and .runtime\\ survive a rebuild;
+        a file this script owned in an earlier build but no longer wants is
+        removed by its exact recorded path, nothing else."""
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+
+        root = self.dev_output()
+        venv_marker = root / ".venv" / "Scripts" / "python.exe"
+        venv_marker.parent.mkdir(parents=True, exist_ok=True)
+        venv_marker.write_text("fake venv", encoding="utf-8")
+        config_marker = root / "config" / "local" / "runtime.yaml"
+        config_marker.write_text("user config", encoding="utf-8")
+        # A path with a space in the owner's own configuration folder.
+        spaced_marker = root / "config" / "local" / "notes the user left.txt"
+        spaced_marker.write_text("owner note", encoding="utf-8")
+        runtime_marker = root / ".runtime" / "gateway.pid"
+        runtime_marker.parent.mkdir(parents=True, exist_ok=True)
+        runtime_marker.write_text("12345", encoding="utf-8")
+
+        manifest_path = root / ".localcanvas-dev-build-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        # A REALISTIC stale entry: something that could actually have been
+        # allowlisted and owned by an earlier build (docs\ is one of the
+        # allowed top-level directories) -- not an arbitrary flat filename,
+        # which R2's containment-and-allowlist check correctly no longer
+        # trusts for a deletion (see
+        # test_a_tampered_manifest_never_deletes_anything_outside_its_own_allowlist).
+        manifest["owned_files"].append("docs\\a-stale-owned-file.md")
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        stale_file = root / "docs" / "a-stale-owned-file.md"
+        stale_file.parent.mkdir(parents=True, exist_ok=True)
+        stale_file.write_text("stale", encoding="utf-8")
+
+        second = self.run_build()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+
+        self.assertEqual("fake venv", venv_marker.read_text(encoding="utf-8"))
+        self.assertEqual("user config", config_marker.read_text(encoding="utf-8"))
+        self.assertEqual("owner note", spaced_marker.read_text(encoding="utf-8"))
+        self.assertEqual("12345", runtime_marker.read_text(encoding="utf-8"))
+        self.assertFalse(
+            stale_file.exists(),
+            "a file this script owned in an earlier build must be removed once no longer wanted")
+
+    def test_a_launcher_project_at_a_path_with_a_space_publishes_and_builds(self):
+        """Test 7: a real dotnet publish, at a path with a space in it.
+
+        The one test in this class that does not use -SkipPublish: it copies
+        the real launcher project (never edits it) into a throwaway directory
+        whose own path contains a space, and publishes THAT copy through the
+        same -LauncherProjectPathForTests seam the forced-failure test above
+        uses, proving the whole publish-and-verify path handles a space
+        correctly rather than only the parts -SkipPublish exercises.
+        """
+        workspace = make_temporary_directory(prefix="lc build launcher space ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        spaced_project = workspace / "dev build project"
+        shutil.copytree(
+            LAUNCHER / "LocalCanvas.Launcher", spaced_project,
+            ignore=shutil.ignore_patterns("bin", "obj", "TestResults"))
+        shutil.copy2(LAUNCHER / "Directory.Build.props", spaced_project / "Directory.Build.props")
+
+        result = subprocess.run(
+            self.build_launcher_arguments(
+                "-LauncherProjectPathForTests", str(spaced_project), skip_publish=False),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL, timeout=180, cwd=str(REPO))
+        output = result.stdout + result.stderr
+        self.assertEqual(0, result.returncode, output)
+        self.assertIn("LocalCanvas developer build ready:", output)
+        published_exe = spaced_project / "bin" / "publish" / "win-x64-dev" / "LocalCanvas.exe"
+        self.assertTrue(published_exe.is_file(), output)
+        self.assertGreater(published_exe.stat().st_size, 1_000_000, "not a real self-contained publish")
+        dest_exe = self.dev_output() / "LocalCanvas.exe"
+        self.assertTrue(dest_exe.is_file())
+        self.assertEqual(published_exe.read_bytes(), dest_exe.read_bytes())
+
+    def test_a_tampered_manifest_never_deletes_anything_outside_its_own_allowlist(self):
+        """R2: the manifest is a file inside the user-writable output folder,
+        so nothing in it is trusted blindly for a deletion -- checked as a
+        CLASS of attack, not as a list of the shapes measured so far.
+
+        Direct hits (no disguise needed at all): an owner's real config, an
+        owner's real .venv content, an unrelated file this script never
+        wrote, and a "..\\" escape outside the destination folder entirely.
+
+        Disguised hits: the same four targets, each reached through a
+        "..\\" that starts inside an ALLOWED prefix (docs\\.., gateway\\..,
+        config\\examples\\.., scripts\\..) -- these must resolve to the
+        SAME protected files as the direct hits above and be refused for
+        the same reason, never let through because the raw text starts
+        with a directory name the allowlist happens to permit.
+
+        A junction: docs\\evil, planted with `mklink /J` (no admin rights
+        needed) inside a throwaway directory, pointing at ANOTHER throwaway
+        directory -- never a real location (AGENTS.md section H) -- with a
+        manifest entry naming a file inside it. GetFullPath does not
+        resolve or even notice a reparse point, so the reparse-point walk
+        is what has to catch this one; the string-level checks alone
+        would not.
+
+        A stale entry that no longer exists at all: it must be skipped
+        quietly, never crash the build or wedge every later rebuild the
+        same way (the exact side finding the previous round's own fix
+        missed).
+
+        And the positive control: a REAL, legitimately stale allowlisted
+        file (docs\\stale.md) must still be removed -- proving this test
+        does not pass merely because the fix now refuses everything.
+        """
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+
+        root = self.dev_output()
+        config_marker = root / "config" / "local" / "runtime.yaml"
+        config_marker.parent.mkdir(parents=True, exist_ok=True)
+        config_marker.write_text("user config", encoding="utf-8")
+        venv_marker = root / ".venv" / "Scripts" / "python.exe"
+        venv_marker.parent.mkdir(parents=True, exist_ok=True)
+        venv_marker.write_text("fake venv", encoding="utf-8")
+        runtime_marker = root / ".runtime" / "gateway.pid"
+        runtime_marker.parent.mkdir(parents=True, exist_ok=True)
+        runtime_marker.write_text("12345", encoding="utf-8")
+        unrelated_marker = root / "my own notes.txt"
+        unrelated_marker.write_text("mine", encoding="utf-8")
+        # ".." from $destination (self.output_root/LocalCanvas) resolves to
+        # self.output_root itself -- still inside this test's OWN temporary
+        # workspace, never touching anything outside it, but genuinely
+        # outside the LocalCanvas destination folder the manifest is for.
+        outside_marker = self.output_root / "outside.txt"
+        outside_marker.write_text("victim", encoding="utf-8")
+
+        # The legitimately stale file: a real allowlisted path, planted so
+        # it can actually be removed once the manifest says so.
+        legitimately_stale = root / "docs" / "stale.md"
+        legitimately_stale.parent.mkdir(parents=True, exist_ok=True)
+        legitimately_stale.write_text("stale", encoding="utf-8")
+
+        # The junction: docs\evil -> a throwaway directory that is NOT
+        # under $destination at all, holding a victim file of its own.
+        junction_target = make_temporary_directory(prefix="lc r2 junction target ")
+        self.addCleanup(shutil.rmtree, junction_target, True)
+        junction_victim = junction_target / "victim.txt"
+        junction_victim.write_text("junction victim", encoding="utf-8")
+        junction_path = root / "docs" / "evil"
+        junction_path.parent.mkdir(parents=True, exist_ok=True)
+        mklink = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(junction_path), str(junction_target)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30)
+        self.assertEqual(0, mklink.returncode, mklink.stdout + mklink.stderr)
+
+        manifest_path = root / ".localcanvas-dev-build-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["owned_files"] += [
+            # Direct hits.
+            "config\\local\\runtime.yaml",
+            ".venv\\Scripts\\python.exe",
+            "my own notes.txt",
+            "..\\outside.txt",
+            # Disguised hits: the same targets, through a ".." that starts
+            # inside an allowed prefix.
+            "docs\\..\\config\\local\\runtime.yaml",
+            "gateway\\..\\.venv\\Scripts\\python.exe",
+            "config\\examples\\..\\local\\runtime.yaml",
+            "scripts\\..\\.runtime\\gateway.pid",
+            "docs\\..\\my own notes.txt",
+            # The junction escape.
+            "docs\\evil\\victim.txt",
+            # A stale entry that simply no longer exists.
+            "docs\\this-file-does-not-exist-any-more.md",
+            # The positive control: a real, legitimately stale file.
+            "docs\\stale.md",
+        ]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        second = self.run_build()
+        self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+
+        self.assertEqual("user config", config_marker.read_text(encoding="utf-8"))
+        self.assertEqual("fake venv", venv_marker.read_text(encoding="utf-8"))
+        self.assertEqual("12345", runtime_marker.read_text(encoding="utf-8"))
+        self.assertEqual("mine", unrelated_marker.read_text(encoding="utf-8"))
+        self.assertEqual("victim", outside_marker.read_text(encoding="utf-8"))
+        self.assertEqual("junction victim", junction_victim.read_text(encoding="utf-8"))
+        self.assertFalse(
+            legitimately_stale.exists(),
+            "a REAL stale allowlisted file must still be removed -- the fix must not "
+            "simply refuse everything")
+
+    def test_the_destination_exe_locked_refuses_before_any_swap(self):
+        """M2: a rebuild while the dev launcher is running must never
+        half-swap the destination. Exits non-zero with a clear message,
+        no "ready" line, and the previously-built exe is left byte-identical."""
+        import msvcrt
+
+        first = self.run_build()
+        self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+        exe_path = self.dev_output() / "LocalCanvas.exe"
+        before = self.snapshot(self.dev_output())
+
+        handle = open(exe_path, "r+b")
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            result = self.run_build()
+        finally:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            handle.close()
+
+        output = result.stdout + result.stderr
+        self.assertNotEqual(0, result.returncode, output)
+        self.assertIn("is in use", output, output)
+        self.assertIn("tray menu", output, output)
+        self.assertNotIn("developer build ready", output)
+        after = self.snapshot(self.dev_output())
+        self.assertEqual(before, after,
+                          "a refused build (destination exe locked) must swap nothing")
+
+        # The lock is released (the `finally` above already unlocked and
+        # closed the handle) -- a normal rebuild must recover on its own.
+        third = self.run_build()
+        self.assertEqual(0, third.returncode, third.stdout + third.stderr)
 
 
 class TemporaryPathSpellingTests(unittest.TestCase):
@@ -24679,6 +26004,2041 @@ class ComfyModelLintTests(ComfyBootstrapTestCase):
 # require_integration(), with the reason printed, and a run opts back into it
 # with LOCALCANVAS_INTEGRATION=1.
 
+# ==========================================================================
+# The machine interface: -Component, -Json, instance identity, the port check
+# ==========================================================================
+#
+# docs/runtime.md, "Machine interface". A launcher runs these scripts with no
+# window and standard input the null device, and acts on their exit codes and
+# on the one JSON document each prints. It owns no process logic of its own,
+# so everything it relies on is asserted here, through the real scripts and
+# the suite's stub gateway and stub ComfyUI, on ephemeral loopback ports.
+
+INSTANCE_ID = re.compile(r"^[0-9a-f]{32}$")
+#: Another gateway's instance id, as a harness gateway or a steered stub gives it.
+OTHER_INSTANCE_ID = "0123456789abcdef0123456789abcdef"
+
+
+class MachineInterfaceTestCase(ScriptTestCase):
+    """Shared helpers: one JSON document, a record, listeners the harness owns."""
+
+    def json_document(self, result):
+        """The one document on standard output, or a failure saying what else was there.
+
+        Exactly one line, no byte-order mark, and it parses on its own: a blank
+        line or a human line anywhere on standard output fails here, which a
+        bare json.loads -- that skips whitespace -- would not notice.
+        """
+        output = self.output_of(result)
+        stdout = result.stdout or ""
+        self.assertFalse(stdout.startswith("﻿"), "a byte-order mark on stdout:\n" + output)
+        lines = stdout.splitlines()
+        self.assertEqual(1, len(lines), "stdout is not exactly one line:\n" + repr(stdout)
+                         + "\n--- stderr ---\n" + (result.stderr or ""))
+        self.assertTrue(lines[0].isascii(), "stdout is not ASCII: " + repr(lines[0][:200]))
+        document = json.loads(lines[0])
+        self.assertIsInstance(document, dict, output)
+        for key in ("result_version", "ok", "exit_code", "error"):
+            self.assertIn(key, document, output)
+        self.assertEqual(1, document["result_version"], output)
+        self.assertEqual(result.returncode, document["exit_code"], output)
+        if document["error"] is not None:
+            self.assertEqual({"what", "detail", "fix"}, set(document["error"]), output)
+            self.assertTrue(document["error"]["what"], output)
+        return document
+
+    def run_json(self, name, *extra_args, **kwargs):
+        result = self.run_script(name, *extra_args, "-Json", **kwargs)
+        return result, self.json_document(result)
+
+    def pid_file_bytes(self, role):
+        path = self.runtime_dir / "{}.pid".format(role)
+        return path.read_bytes() if path.exists() else None
+
+    def launched_gateway_pids(self):
+        """PIDs of the gateways start.ps1 launched, from the stub's own tripwire."""
+        if not self.gateway_marker.exists():
+            return []
+        return [int(found) for found in re.findall(
+            r"pid=(\d+)", self.gateway_marker.read_text(encoding="utf-8", errors="replace"))]
+
+    def info(self):
+        with urllib.request.urlopen(self.gateway_health_url, timeout=5) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def start_harness_gateway(self, instance_id=None, **stub_env):
+        """A LocalCanvas gateway the HARNESS owns, on the configured port.
+
+        Its own tripwire file, so it is never counted as a gateway start.ps1
+        launched. It is ended by the teardown, by its PID.
+        """
+        env = self.script_env(**stub_env)
+        env["LC_STUB_GATEWAY_MARKER"] = str(self.workspace / "harness gateway.marker")
+        command = [sys.executable, "-m", "localcanvas_gateway", "--config", str(self.config_path),
+                   "--host", "127.0.0.1", "--port", str(self.gateway_port), "--no-qr", "--no-mdns"]
+        if instance_id:
+            command += ["--instance-id", instance_id]
+        process = subprocess.Popen(command, env=env, cwd=str(REPO),
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.owned_stubs.append(process)
+        self.assertTrue(wait_until(lambda: http_ok(self.gateway_health_url), 30),
+                        "the harness's own gateway stub never answered")
+        return process
+
+    def start_foreign_listener(self, answer):
+        """A listener the harness owns on the gateway port, in this process.
+
+        ``http`` answers every request with HTTP 404 -- an HTTP service that is
+        not a gateway. ``silent`` accepts connections and never answers.
+        """
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", self.gateway_port))
+        listener.listen(16)
+        listener.settimeout(0.25)
+        stop = threading.Event()
+        held = []
+
+        def serve():
+            while not stop.is_set():
+                try:
+                    connection, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                if answer == "silent":
+                    held.append(connection)
+                    continue
+                try:
+                    connection.settimeout(5)
+                    request = b""
+                    while b"\r\n\r\n" not in request:
+                        chunk = connection.recv(4096)
+                        if not chunk:
+                            break
+                        request += chunk
+                    connection.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\n"
+                                       b"Connection: close\r\n\r\nnot found")
+                except OSError:
+                    pass
+                finally:
+                    connection.close()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+
+        def shut_down():
+            stop.set()
+            thread.join(timeout=5)
+            for connection in held:
+                connection.close()
+            listener.close()
+
+        self.addCleanup(shut_down)
+        return thread
+
+
+class ComponentTests(MachineInterfaceTestCase):
+    """start.ps1 and stop.ps1 -Component: each part alone, and nothing else."""
+
+    def test_comfy_component_starts_comfy_and_nothing_else(self):
+        self.write_config()
+        result, document = self.run_json("start.ps1", "-Component", "Comfy")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertTrue(self.comfy_marker.exists(), "ComfyUI was not started")
+        self.assertIsNotNone(self.read_pid_file("comfy"))
+        # No gateway, in any sense: not launched, not recorded, not answering.
+        self.assertFalse(self.gateway_marker.exists(), "-Component Comfy launched a gateway")
+        self.assertIsNone(self.read_pid_file("gateway"))
+        self.assertFalse(http_ok(self.gateway_health_url))
+        # And no workflow check.
+        self.assertNotIn("Workflows:", output)
+        self.assertEqual("Comfy", document["component"])
+        self.assertEqual({"status": "ready", "url": "http://127.0.0.1:{}".format(self.comfy_port),
+                          "ownership": "owned", "pid": self.read_pid_file("comfy")["pid"]},
+                         document["comfy"])
+        self.assertEqual("skipped", document["gateway"]["status"])
+        self.assertIsNone(document["workflows"])
+
+    def test_gateway_component_never_probes_requires_or_touches_comfyui(self):
+        """Managed mode, no ComfyUI anywhere, and a ComfyUI record nobody can read.
+
+        -Component All would launch ComfyUI here and remove that record; the
+        gateway alone must do neither, and must not need ComfyUI to start.
+        """
+        self.write_config()
+        self.write_pid_file("comfy", {"pid": "not a pid"})
+        before = self.pid_file_bytes("comfy")
+
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertFalse(self.comfy_marker.exists(), "-Component Gateway launched ComfyUI")
+        self.assertEqual(before, self.pid_file_bytes("comfy"),
+                         "-Component Gateway touched the ComfyUI ownership record")
+        self.assertNotIn("Workflows:", output)
+        self.assertNotIn("ComfyUI ready", output)
+        self.assertIn("[ OK ] Gateway ready", output)
+        self.assertEqual("skipped", document["comfy"]["status"])
+        self.assertEqual("ready", document["gateway"]["status"])
+        self.assertIsNone(document["workflows"])
+
+    def test_gateway_component_starts_without_an_external_comfyui(self):
+        # All would stop at exit 4 here; the gateway does not require ComfyUI.
+        self.write_config(manage_comfy=False)
+        result = self.run_script("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertNotIn("ComfyUI is not reachable", output)
+        self.assertIn("[ OK ] LocalCanvas Gateway is ready", output)
+        # The control: All, on the same configuration, needs ComfyUI.
+        self.assertEqual(0, self.run_script("stop.ps1", timeout=90).returncode)
+        self.assertEqual(4, self.run_script("start.ps1").returncode)
+
+    def test_workflow_switches_are_refused_with_comfy_or_gateway(self):
+        self.write_config()
+        for component in ("Comfy", "Gateway"):
+            for switch in ("-SyncWorkflows", "-SkipWorkflowCheck"):
+                with self.subTest(component=component, switch=switch):
+                    result, document = self.run_json("start.ps1", "-Component", component, switch)
+                    output = self.output_of(result)
+                    self.assertEqual(2, result.returncode, output)
+                    self.assertIn("{} and -Component {} contradict each other".format(
+                        switch, component), document["error"]["what"])
+                    self.assert_no_stack_trace(output)
+        self.assertFalse(self.comfy_marker.exists())
+        self.assertFalse(self.gateway_marker.exists())
+        # All keeps accepting each of them.
+        self.assertEqual(0, self.run_script("start.ps1", "-SkipWorkflowCheck").returncode)
+
+    def test_stop_gateway_component_leaves_comfyui_and_its_record_alone(self):
+        self.write_config()
+        self.assertEqual(0, self.run_script("start.ps1").returncode)
+        comfy = self.read_pid_file("comfy")
+        comfy_bytes = self.pid_file_bytes("comfy")
+        gateway = self.read_pid_file("gateway")
+        self.assertIsNotNone(comfy)
+        self.assertIsNotNone(gateway)
+
+        result, document = self.run_json("stop.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertTrue(wait_until(lambda: not self.alive(gateway["pid"]), 20))
+        self.assertIsNone(self.read_pid_file("gateway"))
+        # ComfyUI: still running, still answering, its record byte for byte.
+        self.assertTrue(self.alive(comfy["pid"]), "stop -Component Gateway stopped ComfyUI")
+        self.assertTrue(http_ok(self.comfy_health_url))
+        self.assertEqual(comfy_bytes, self.pid_file_bytes("comfy"))
+        self.assertNotIn("ComfyUI", result.stderr)
+        self.assertEqual("Gateway", document["component"])
+        self.assertEqual({"state_before": "running", "action": "stop",
+                          "result": document["roles"]["gateway"]["result"], "pid": gateway["pid"]},
+                         document["roles"]["gateway"])
+        self.assertIn(document["roles"]["gateway"]["result"], ("exited", "terminated"))
+        self.assertEqual({"state_before": None, "action": "skipped", "result": None, "pid": None},
+                         document["roles"]["comfy"])
+
+    def test_stop_gateway_component_does_not_read_a_broken_comfyui_record(self):
+        # All removes an unreadable record; the gateway alone does not look.
+        self.write_config()
+        self.write_pid_file("comfy", {"pid": "not a pid"})
+        before = self.pid_file_bytes("comfy")
+        result = self.run_script("stop.ps1", "-Component", "Gateway")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertEqual(before, self.pid_file_bytes("comfy"))
+        # The control: All does read it, and removes it.
+        result = self.run_script("stop.ps1")
+        self.assertIn("unusable PID file removed", self.output_of(result))
+        self.assertIsNone(self.pid_file_bytes("comfy"))
+
+    def test_restart_gateway_is_stop_then_start_and_comfyui_stays(self):
+        """The launcher's Restart Gateway, end to end."""
+        self.write_config()
+        _, first = self.run_json("start.ps1", "-Component", "All")
+        self.assertTrue(first["ok"], first)
+        comfy_pid = first["comfy"]["pid"]
+
+        _, stopped = self.run_json("stop.ps1", "-Component", "Gateway")
+        self.assertEqual("stop", stopped["roles"]["gateway"]["action"])
+        _, second = self.run_json("start.ps1", "-Component", "Gateway")
+        self.assertEqual("ready", second["gateway"]["status"])
+        self.assertNotEqual(first["gateway"]["instance_id"], second["gateway"]["instance_id"])
+        self.assertNotEqual(first["gateway"]["pid"], second["gateway"]["pid"])
+        self.assertEqual(second["gateway"]["instance_id"], self.info()["instance_id"])
+        self.assertTrue(self.alive(comfy_pid))
+        self.assertEqual(comfy_pid, self.read_pid_file("comfy")["pid"])
+
+
+class GatewayIdentityTests(MachineInterfaceTestCase):
+    """The instance id: generated, passed, recorded -- and required."""
+
+    def test_the_instance_id_is_generated_passed_and_recorded(self):
+        self.write_config(gateway_host="127.0.0.1")
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        gateway = document["gateway"]
+        self.assertRegex(gateway["instance_id"], INSTANCE_ID)
+        # Passed: the gateway itself echoes it.
+        self.assertEqual(gateway["instance_id"], self.info()["instance_id"])
+        # Recorded, beside the identity evidence, with the published endpoint.
+        record = self.read_pid_file("gateway")
+        self.assertEqual(gateway["instance_id"], record["instance_id"])
+        self.assertEqual(gateway["pid"], record["pid"])
+        self.assertEqual("http://127.0.0.1:{}".format(self.gateway_port), record["published_endpoint"])
+        self.assertIs(False, record["is_lan"])
+        self.assertEqual("loopback-bind", record["local_only_reason"])
+        for key in ("published_endpoint", "is_lan", "local_only_reason"):
+            self.assertEqual(record[key], gateway[key], key)
+        self.assertEqual("http://127.0.0.1:{}/api/v1/info".format(self.gateway_port), gateway["probe_url"])
+        for key in ("pid", "start_time_utc_ticks", "image_path", "owned_by"):
+            self.assertIn(key, record)
+
+    def test_every_launch_gets_a_fresh_id(self):
+        self.write_config()
+        ids = []
+        for _ in range(2):
+            _, document = self.run_json("start.ps1", "-Component", "Gateway")
+            ids.append(document["gateway"]["instance_id"])
+            self.assertEqual(0, self.run_script("stop.ps1", "-Component", "Gateway").returncode)
+        self.assertNotEqual(ids[0], ids[1])
+
+    def test_a_localcanvas_answer_with_another_instance_id_is_not_ready(self):
+        """Our own child alive and answering -- as another instance. Not ready."""
+        self.write_config(gateway_timeout=3)
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway",
+            env=self.script_env(LC_STUB_GATEWAY_INSTANCE_ID=OTHER_INSTANCE_ID))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("gateway did not become ready within 3s", output)
+        self.assertIn("answered with instance {}".format(OTHER_INSTANCE_ID), output)
+        self.assertNotIn("[ OK ] Gateway ready", output)
+        self.assertIsNone(self.read_pid_file("gateway"))
+        # The child it started was stopped, by its PID.
+        for pid in self.launched_gateway_pids():
+            self.assertTrue(wait_until(lambda: not self.alive(pid), 20), pid)
+        self.assertEqual("failed", document["gateway"]["status"])
+        self.assertFalse(document["ok"])
+
+    def test_an_answer_after_the_child_exited_is_not_ready(self):
+        """The started process exits; its heir holds the port and answers as it.
+
+        The stub hands the port to a copy of itself that answers -- with the
+        very instance id start.ps1 generated -- only after the process that was
+        started has exited. Identity alone cannot tell; only "our child has not
+        exited" can. And the heir, which this run cannot prove it owns, is left
+        exactly as it is.
+        """
+        self.write_config(gateway_timeout=15)
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway", env=self.script_env(LC_STUB_GATEWAY_HANDOFF="1"))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("The gateway process exited before it became ready.", output)
+        self.assertNotIn("[ OK ] Gateway ready", output)
+        self.assertIsNone(self.read_pid_file("gateway"))
+        launched = self.launched_gateway_pids()
+        self.assertEqual(2, len(launched), "expected the started gateway and its heir: " + output)
+        started, heir = launched
+        self.assertFalse(self.alive(started))
+        # Untouched: still running, and answering with the id this run generated.
+        self.assertTrue(self.alive(heir), "start.ps1 stopped a process it did not start")
+        self.assertTrue(wait_until(lambda: http_ok(self.gateway_health_url), 20))
+        self.assertEqual(document["gateway"]["instance_id"], self.info()["instance_id"])
+
+    def test_a_running_gateway_is_reused_only_with_its_recorded_id(self):
+        self.write_config()
+        _, first = self.run_json("start.ps1", "-Component", "Gateway")
+        _, again = self.run_json("start.ps1", "-Component", "Gateway")
+        self.assertEqual("reused", again["gateway"]["status"])
+        self.assertEqual(first["gateway"]["pid"], again["gateway"]["pid"])
+        self.assertEqual(first["gateway"]["instance_id"], again["gateway"]["instance_id"])
+        self.assertEqual(first["gateway"]["published_endpoint"], again["gateway"]["published_endpoint"])
+        self.assertEqual(1, len(self.launched_gateway_pids()), "a second gateway was launched")
+
+    def test_a_record_whose_id_does_not_answer_is_not_reused_and_nothing_is_stopped(self):
+        self.write_config(gateway_timeout=3)
+        _, first = self.run_json("start.ps1", "-Component", "Gateway")
+        record = self.read_pid_file("gateway")
+        record["instance_id"] = OTHER_INSTANCE_ID
+        self.write_pid_file("gateway", record)
+        rewritten = self.pid_file_bytes("gateway")
+
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("did not answer as the gateway recorded for it (instance {})".format(
+            OTHER_INSTANCE_ID), output)
+        self.assertIn("Port {} is already in use".format(self.gateway_port), output)
+        self.assertEqual("failed", document["gateway"]["status"])
+        # Nothing stopped, nothing launched, the evidence kept as it was.
+        self.assertTrue(self.alive(first["gateway"]["pid"]))
+        self.assertEqual(1, len(self.launched_gateway_pids()))
+        self.assertEqual(rewritten, self.pid_file_bytes("gateway"))
+
+    def test_a_record_from_before_instance_ids_is_not_reused_and_still_stops(self):
+        self.write_config()
+        _, first = self.run_json("start.ps1", "-Component", "Gateway")
+        record = self.read_pid_file("gateway")
+        for key in ("instance_id", "published_endpoint", "is_lan", "local_only_reason"):
+            record.pop(key)
+        self.write_pid_file("gateway", record)
+        old = self.pid_file_bytes("gateway")
+
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIn("its ownership record carries no instance id", output)
+        self.assertTrue(self.alive(first["gateway"]["pid"]))
+        self.assertEqual(old, self.pid_file_bytes("gateway"))
+        self.assertEqual(1, len(self.launched_gateway_pids()))
+
+        # The older record still loads, and still proves ownership for a stop.
+        stop, stopped = self.run_json("stop.ps1", "-Component", "Gateway")
+        self.assertEqual("running", stopped["roles"]["gateway"]["state_before"], self.output_of(stop))
+        self.assertEqual("stop", stopped["roles"]["gateway"]["action"])
+        self.assertTrue(wait_until(lambda: not self.alive(first["gateway"]["pid"]), 20))
+
+    def test_status_reports_identity_and_whether_it_matches_the_record(self):
+        self.write_config()
+        _, started = self.run_json("start.ps1", "-Component", "Gateway")
+        _, status = self.run_json("status.ps1")
+        gateway = status["gateway"]
+        self.assertTrue(gateway["reachable"])
+        self.assertEqual("localcanvas", gateway["identity"])
+        self.assertEqual(started["gateway"]["instance_id"], gateway["instance_id"])
+        self.assertIs(True, gateway["instance_matches_record"])
+        self.assertEqual("running", gateway["ownership"])
+        self.assertEqual(started["gateway"]["pid"], gateway["pid"])
+        self.assertEqual(started["gateway"]["published_endpoint"], gateway["published_endpoint"])
+
+        record = self.read_pid_file("gateway")
+        record["instance_id"] = OTHER_INSTANCE_ID
+        self.write_pid_file("gateway", record)
+        _, status = self.run_json("status.ps1")
+        self.assertIs(False, status["gateway"]["instance_matches_record"])
+
+
+class GatewayPortCheckTests(MachineInterfaceTestCase):
+    """Nothing is launched onto a port something already holds (the race)."""
+
+    def assert_refused_for_the_port(self, result, document):
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertEqual("Port {} is already in use".format(self.gateway_port), document["error"]["what"])
+        self.assertIn("gateway.port", document["error"]["fix"])
+        self.assertIn("Nothing on that port was touched, and no gateway was started.", output)
+        self.assertFalse(self.gateway_marker.exists(), "a gateway was launched onto a taken port")
+        self.assertIsNone(self.read_pid_file("gateway"))
+        self.assertNotIn("[ OK ] Gateway ready", output)
+        self.assert_no_stack_trace(output)
+        return output
+
+    def test_another_localcanvas_gateway_on_the_port_is_named_and_left_alone(self):
+        self.write_config()
+        harness = self.start_harness_gateway(instance_id=OTHER_INSTANCE_ID)
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("Another LocalCanvas gateway is already answering on it (instance {}).".format(
+            OTHER_INSTANCE_ID), output)
+        self.assertIsNone(harness.poll(), "start.ps1 stopped a gateway it did not start")
+        self.assertEqual(OTHER_INSTANCE_ID, self.info()["instance_id"])
+
+    def test_the_whole_start_is_refused_the_same_way(self):
+        self.write_config()
+        harness = self.start_harness_gateway(instance_id=OTHER_INSTANCE_ID)
+        result, document = self.run_json("start.ps1")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("ComfyUI (PID {}) was left running".format(document["comfy"]["pid"]), output)
+        self.assertIsNone(harness.poll())
+
+    def test_an_http_service_that_is_not_a_gateway_is_refused(self):
+        self.write_config()
+        self.start_foreign_listener("http")
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("Something that is not a LocalCanvas gateway is answering on it.", output)
+
+    def test_a_listener_that_never_answers_is_refused(self):
+        self.write_config()
+        self.start_foreign_listener("silent")
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.assert_refused_for_the_port(result, document)
+        self.assertIn("A program is accepting connections on it.", output)
+
+
+class JsonDocumentTests(MachineInterfaceTestCase):
+    """-Json: one document on standard output, on every exit path of every script."""
+
+    def write_config_with_a_port_that_is_not_a_number(self):
+        """A configuration the stub loader passes through and the scripts
+        cannot use: gateway.port is text. Reading it is an unexpected failure
+        -- exit 1 -- rather than a configuration one."""
+        self.write_config()
+        self.write_config(body=self.config_path.read_text(encoding="utf-8").replace(
+            "  port: {}\nstartup".format(self.gateway_port), "  port: not-a-port\nstartup"))
+
+    def test_start_prints_one_document_on_every_exit_path(self):
+        cases = []
+        self.write_config()
+        cases.append(("ready", 0, self.run_script("start.ps1", "-Json")))
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        cases.append(("contradictory switches", 2, self.run_script(
+            "start.ps1", "-SyncWorkflows", "-SkipWorkflowCheck", "-Json")))
+        cases.append(("missing configuration", 2, self.run_script(
+            "start.ps1", "-Json", config=self.workspace / "no such.yaml")))
+        self.write_config_with_a_port_that_is_not_a_number()
+        cases.append(("unexpected", 1, self.run_script("start.ps1", "-Component", "Gateway", "-Json")))
+        self.write_config(comfy_timeout=3, comfy_extra_args=[
+            "--port", str(self.comfy_port), "--launch-marker", str(self.comfy_marker), "--never-ready"])
+        cases.append(("managed ComfyUI never ready", 3, self.run_script("start.ps1", "-Json")))
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        self.write_config(manage_comfy=False)
+        cases.append(("external ComfyUI down", 4, self.run_script("start.ps1", "-Json")))
+        self.write_config(gateway_timeout=3)
+        cases.append(("gateway never ready", 5, self.run_script(
+            "start.ps1", "-Component", "Gateway", "-Json",
+            env=self.script_env(LC_STUB_GATEWAY_HANG="1"))))
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        for label, code, result in cases:
+            with self.subTest(path=label):
+                self.assertEqual(code, result.returncode, self.output_of(result))
+                document = self.json_document(result)
+                self.assertIs(code == 0, document["ok"])
+                self.assertEqual(code == 0, document["error"] is None)
+                for key in ("component", "comfy", "gateway", "workflows"):
+                    self.assertIn(key, document)
+                # The human lines are all on standard error.
+                if code:
+                    self.assertIn("[FAIL] " + document["error"]["what"], result.stderr)
+
+    def test_the_success_document_carries_what_the_launcher_needs(self):
+        self.write_config(gateway_host="0.0.0.0")
+        result, document = self.run_json("start.ps1")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertEqual("All", document["component"])
+        self.assertEqual("ready", document["comfy"]["status"])
+        self.assertEqual("owned", document["comfy"]["ownership"])
+        self.assertEqual(self.read_pid_file("comfy")["pid"], document["comfy"]["pid"])
+        gateway = document["gateway"]
+        self.assertEqual("ready", gateway["status"])
+        self.assertEqual(self.read_pid_file("gateway")["pid"], gateway["pid"])
+        self.assertRegex(gateway["instance_id"], INSTANCE_ID)
+        self.assertIsInstance(gateway["is_lan"], bool)
+        self.assertTrue(gateway["published_endpoint"].endswith(":{}".format(self.gateway_port)))
+        self.assertEqual("not_configured", document["workflows"]["status"])
+        # Every human line went to standard error, including the readiness block.
+        self.assertIn("[ OK ] LocalCanvas is ready", result.stderr)
+        self.assertIn("localcanvas://connect?endpoint=", result.stderr)
+
+    def test_a_reused_comfyui_is_reported_as_reused(self):
+        stub = self.start_backend_stub()
+        self.write_config()
+        _, document = self.run_json("start.ps1")
+        self.assertEqual({"status": "ready", "url": "http://127.0.0.1:{}".format(self.comfy_port),
+                          "ownership": "reused", "pid": None}, document["comfy"])
+        self.assertIsNone(stub.poll())
+        self.write_config(manage_comfy=False)
+        self.assertEqual(0, self.run_script("stop.ps1").returncode)
+        _, document = self.run_json("start.ps1")
+        self.assertEqual("external", document["comfy"]["ownership"])
+
+    def test_stop_prints_one_document_on_every_exit_path(self):
+        self.write_config()
+        self.assertEqual(0, self.run_script("start.ps1").returncode)
+        comfy_pid = self.read_pid_file("comfy")["pid"]
+        result, document = self.run_json("stop.ps1")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertTrue(document["ok"])
+        self.assertEqual("All", document["component"])
+        self.assertEqual("stop", document["roles"]["comfy"]["action"])
+        self.assertEqual(comfy_pid, document["roles"]["comfy"]["pid"])
+        self.assertIn(document["roles"]["comfy"]["result"], ("exited", "terminated"))
+
+        # Nothing owned: 'none', and nothing done.
+        result, document = self.run_json("stop.ps1")
+        self.assertEqual({"state_before": "none", "action": "none", "result": None, "pid": None},
+                         document["roles"]["gateway"])
+
+        # An unprovable record: kept, and said so.
+        idle = self.start_idle_process()
+        self.write_pid_file("gateway", self.unprovable_record(idle.pid, role="gateway"))
+        _, document = self.run_json("stop.ps1")
+        self.assertEqual("unproven", document["roles"]["gateway"]["state_before"])
+        self.assertEqual("record_kept", document["roles"]["gateway"]["action"])
+        self.assertIsNone(idle.poll())
+        (self.runtime_dir / "gateway.pid").unlink()
+
+        # Exit 1: a record that is a directory with something in it cannot be
+        # read or removed.
+        broken = self.runtime_dir / "gateway.pid"
+        broken.mkdir(parents=True)
+        (broken / "inside").write_text("x", encoding="utf-8")
+        result = self.run_script("stop.ps1", "-Json")
+        self.assertEqual(1, result.returncode, self.output_of(result))
+        document = self.json_document(result)
+        self.assertFalse(document["ok"])
+        self.assertEqual("Stopping LocalCanvas did not complete", document["error"]["what"])
+        shutil.rmtree(broken)
+
+    def test_status_prints_one_document_and_creates_nothing(self):
+        self.write_config()
+        before = sorted(str(path) for path in self.workspace.rglob("*"))
+        result, document = self.run_json("status.ps1")
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertEqual(before, sorted(str(path) for path in self.workspace.rglob("*")),
+                         "status.ps1 -Json created something")
+        self.assertFalse(self.runtime_dir.exists())
+        self.assertTrue(document["config_ok"])
+        self.assertEqual("managed", document["mode"])
+        self.assertEqual({"url": "http://127.0.0.1:{}".format(self.comfy_port), "healthy": False,
+                          "ownership": "none"}, document["comfy"])
+        self.assertEqual("none", document["gateway"]["identity"])
+        self.assertIs(False, document["gateway"]["reachable"])
+        self.assertIsNone(document["gateway"]["instance_matches_record"])
+
+        result = self.run_script("status.ps1", "-Json", config=self.workspace / "no such.yaml")
+        self.assertEqual(2, result.returncode)
+        document = self.json_document(result)
+        self.assertFalse(document["config_ok"])
+        self.assertIsNone(document["mode"])
+
+        self.write_config_with_a_port_that_is_not_a_number()
+        result = self.run_script("status.ps1", "-Json")
+        self.assertEqual(1, result.returncode, self.output_of(result))
+        self.json_document(result)
+        self.assertFalse(self.runtime_dir.exists())
+
+    def test_status_says_foreign_for_an_answer_that_is_not_a_gateway(self):
+        self.write_config()
+        self.start_foreign_listener("http")
+        _, document = self.run_json("status.ps1")
+        self.assertEqual("foreign", document["gateway"]["identity"])
+        self.assertIs(False, document["gateway"]["reachable"])
+
+
+class SyncJsonTests(StartWorkflowTestCase, MachineInterfaceTestCase):
+    """sync-workflows.ps1 -Json: compact, and the same arithmetic as start.ps1."""
+
+    def run_sync_json(self, *extra_args, mode="tree", config=None, env=None):
+        result = self.run_script(
+            "sync-workflows.ps1", "-RuntimeConfig", str(self.config_path), *extra_args, "-Json",
+            config=config if config is not None else self.sources_config,
+            env=env if env is not None else self.sync_env(mode=mode))
+        return result, self.json_document(result)
+
+    def test_changes_and_attention_are_the_numbers_start_acts_on(self):
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=7))
+        self.write_workflow("a canvas.json", self.editor_graph())
+        self.write_workflow("not a workflow.json", self.ambiguous_document())
+
+        start, started = self.run_json(
+            "start.ps1", "-Component", "All", "-WorkflowSources", str(self.sources_config),
+            env=self.sync_env())
+        self.assertEqual(0, start.returncode, self.output_of(start))
+        workflows = started["workflows"]
+        self.assertEqual("checked", workflows["status"])
+        self.assertEqual("unasked", workflows["sync"]["answer"])
+
+        result, document = self.run_sync_json("-DryRun", "-NoConvert")
+        self.assertEqual(3, result.returncode, self.output_of(result))
+        self.assertTrue(document["ok"], "attention is not a failure")
+        self.assertIsNone(document["error"])
+        self.assertIs(True, document["dry_run"])
+        self.assertIs(True, document["no_convert"])
+        for key in ("changes", "attention", "new", "changed", "retry", "removed"):
+            self.assertEqual(workflows[key], document[key], key)
+        self.assertGreater(document["changes"], 0)
+        self.assertGreater(document["attention"], 0)
+        self.assertIsInstance(document["counts"], dict)
+        self.assertIn("unconverted_editor", document)
+        self.assertTrue(document["summary"])
+        self.assertEqual(0, document["definitions_written"])
+        names = {item["state"] for item in document["attention_items"]}
+        self.assertIn("NEEDS_REVIEW", names)
+        for item in document["attention_items"]:
+            self.assertEqual({"id", "state", "reason"}, set(item))
+            self.assertNotIn("\n", item["reason"] or "")
+        # Compact: not the engine's whole report.
+        self.assertNotIn("workflows", document)
+        self.assertNotIn("sources", document)
+
+    def test_a_real_sync_reports_the_definitions_it_wrote(self):
+        self.write_workflow("one.json", self.api_graph(seed=1))
+        self.write_workflow("two.json", self.api_graph(seed=2))
+        result, document = self.run_sync_json()
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        self.assertTrue(document["ok"])
+        self.assertIs(False, document["dry_run"])
+        self.assertEqual(2, document["definitions_written"])
+        self.assertEqual(2, document["new"])
+        self.assertEqual([], document["attention_items"])
+
+    def test_attention_items_are_capped_at_fifty(self):
+        for number in range(53):
+            self.write_workflow("broken {:02d}.json".format(number), self.ambiguous_document())
+        result, document = self.run_sync_json("-DryRun")
+        self.assertEqual(3, result.returncode, self.output_of(result))
+        self.assertEqual(50, len(document["attention_items"]))
+        self.assertEqual(53, document["attention_items_total"])
+        self.assertEqual(53, document["attention"])
+
+    def test_every_exit_path_prints_one_document(self):
+        cases = (
+            ("attention", 3, dict(mode="attention")),
+            ("engine refused the configuration", 2, dict(mode="fatal")),
+            ("engine printed garbage", 1, dict(mode="garbage")),
+            ("engine crashed", 1, dict(mode="crash")),
+            ("no source list", 2, dict(config=self.workspace / "no such sources.yaml")),
+        )
+        for label, code, arguments in cases:
+            with self.subTest(path=label):
+                result, document = self.run_sync_json(**arguments)
+                self.assertEqual(code, result.returncode, self.output_of(result))
+                self.assertIs(code in (0, 3), document["ok"])
+                if code in (0, 3):
+                    self.assertIsNone(document["error"])
+                else:
+                    self.assertIsNotNone(document["error"])
+                    self.assertIsNone(document["counts"])
+
+    def test_start_json_exit_6_is_one_document_too(self):
+        # The check cannot run, and there is no catalogue to start on.
+        self.write_workflow("one.json", self.api_graph(seed=3))
+        result, document = self.run_json(
+            "start.ps1", "-WorkflowSources", str(self.sources_config), env=self.sync_env(mode="fatal"))
+        self.assertEqual(6, result.returncode, self.output_of(result))
+        self.assertEqual("failed", document["workflows"]["status"])
+        self.assertEqual("LocalCanvas has no workflow catalogue to start on", document["error"]["what"])
+        self.assertEqual("skipped", document["gateway"]["status"])
+        self.assertFalse(self.gateway_marker.exists())
+
+    def test_start_json_with_a_sync_keeps_the_sync_document_off_stdout(self):
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=9))
+        result, document = self.run_json(
+            "start.ps1", "-SyncWorkflows", "-WorkflowSources", str(self.sources_config),
+            env=self.sync_env())
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        sync = document["workflows"]["sync"]
+        self.assertEqual("yes", sync["answer"])
+        self.assertEqual(0, sync["exit_code"])
+        self.assertEqual(1, sync["definitions_written"])
+        self.assertIn("LocalCanvas workflow sync", result.stderr)
+
+
+class HiddenConsoleTests(StartWorkflowTestCase, MachineInterfaceTestCase):
+    """The launcher's shape: no window, no -NonInteractive, nobody to ask."""
+
+    def run_hidden(self, name, *arguments, env=None, deadline=240):
+        """Run a script the way the launcher will: no window of its own, no
+        -NonInteractive, standard input the null device."""
+        command = [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", str(SCRIPTS / name), "-PythonExe", sys.executable] + list(arguments)
+        process = subprocess.Popen(
+            command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env if env is not None else self.sync_env(), cwd=str(REPO),
+            creationflags=OWN_CONSOLE)
+        self.owned_stubs.append(process)
+        try:
+            out, err = process.communicate(timeout=deadline)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate(timeout=30)
+            self.fail("{} {} was still running after {}s -- it waited on something".format(
+                name, " ".join(arguments), deadline))
+        return subprocess.CompletedProcess(command, process.returncode,
+                                           out.decode("utf-8", "replace"),
+                                           err.decode("utf-8", "replace"))
+
+    def test_no_script_asks_anything_and_stdout_is_only_the_document(self):
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=11))
+        runs = (
+            ("start.ps1", "-Config", str(self.config_path), "-WorkflowSources", str(self.sources_config)),
+            ("status.ps1", "-Config", str(self.config_path)),
+            ("sync-workflows.ps1", "-Config", str(self.sources_config),
+             "-RuntimeConfig", str(self.config_path), "-DryRun", "-NoConvert"),
+            ("stop.ps1", "-Config", str(self.config_path)),
+        )
+        for name, *arguments in runs:
+            with self.subTest(script=name):
+                result = self.run_hidden(name, *arguments, "-Json")
+                self.assertIn(result.returncode, (0, 3), self.output_of(result))
+                document = self.json_document(result)
+                if name == "start.ps1":
+                    # Something changed, and nobody was asked about it.
+                    self.assertEqual("unasked", document["workflows"]["sync"]["answer"])
+                    self.assertEqual([], self.sync_invocations())
+
+    def test_start_json_does_not_wait_on_an_open_standard_input(self):
+        """An open pipe nobody writes to: the shape in which a prompt blocks for ever."""
+        self.establish_catalogue()
+        self.write_workflow("brand new.json", self.api_graph(seed=12))
+        out_path = self.workspace / "hidden.out.log"
+        err_path = self.workspace / "hidden.err.log"
+        command = [PWSH, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                   "-File", str(SCRIPTS / "start.ps1"), "-Config", str(self.config_path),
+                   "-PythonExe", sys.executable, "-WorkflowSources", str(self.sources_config), "-Json"]
+        with open(out_path, "wb") as out, open(err_path, "wb") as err:
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=out, stderr=err,
+                                       env=self.sync_env(), cwd=str(REPO), creationflags=OWN_CONSOLE)
+            self.owned_stubs.append(process)
+            try:
+                code = process.wait(timeout=240)
+            except subprocess.TimeoutExpired:
+                code = None
+                process.kill()
+                process.wait(timeout=30)
+            finally:
+                try:
+                    process.stdin.close()
+                except OSError:
+                    pass
+        self.assertEqual(0, code, err_path.read_text(encoding="utf-8", errors="replace"))
+        result = subprocess.CompletedProcess(
+            command, code, out_path.read_text(encoding="utf-8"),
+            err_path.read_text(encoding="utf-8", errors="replace"))
+        document = self.json_document(result)
+        self.assertEqual("unasked", document["workflows"]["sync"]["answer"])
+
+
+def current_user_sid():
+    """The SID of the account this suite runs as, from whoami. Asks nothing else."""
+    result = subprocess.run(["whoami", "/user", "/fo", "csv", "/nh"],
+                            capture_output=True, text=True, encoding="utf-8",
+                            errors="replace", timeout=60)
+    found = re.search(r"(S-1-[0-9-]+)", result.stdout or "")
+    return found.group(1) if found else None
+
+
+# ==========================================================================
+# Every WMI/CIM call in the scripts carries the bound
+# ==========================================================================
+#
+# The rule SystemQueryBoundTests exercises, held in the source: anything that
+# waits on WMI appears only inside the -Query script block of
+# Invoke-LcBoundedSystemQuery, and a CimCmdlets call there also asks WMI itself
+# for the same bound with -OperationTimeoutSec $SystemQueryTimeoutSeconds.
+#
+# "Anything that waits on WMI" is decided by RESOLVING each command, not by its
+# spelling. Every command name in the syntax tree is looked up with Get-Command
+# -- an alias (gcim, icim, ncms) to what it stands for, a module-qualified name
+# (CimCmdlets\Get-CimInstance) to its command -- and it counts when the
+# resolved command is:
+#
+#   * from CimCmdlets (Get-CimInstance, Invoke-CimMethod, New-CimSession ...);
+#   * a cmdletization (CDXML) function -- the form every CIM-backed module
+#     takes: Net*, DnsClient, Storage (Get-Volume, Get-Disk), PnpDevice,
+#     SmbShare, PrintManagement, ScheduledTasks and the rest;
+#   * one of the few binary cmdlets that query WMI themselves
+#     (WMI_BACKED_CMDLETS: Get-ComputerInfo, Get-HotFix ...).
+#
+# The old name pattern stays as a second net, for a name this machine cannot
+# resolve (Get-WmiObject does not exist in PowerShell 7, and a module can be
+# missing on some machine). Beside the commands, a TYPE that reaches WMI counts
+# too: [wmi], [wmisearcher], [wmiclass], System.Management.* (not .Automation),
+# Microsoft.Management.Infrastructure.* -- as a cast, a static call or a
+# parameter type -- and New-Object naming one of those, or WbemScripting.
+#
+# KNOWN LIMITS, deliberately not chased: a command whose name is only known at
+# run time (`& $name`, `Invoke-Expression`, `[scriptblock]::Create(...)`), and
+# a type named only in a string handed to reflection. None of these appears in
+# the scripts, and each would be visible in review as the unusual thing it is.
+
+WMI_COMMAND = re.compile(
+    r"^(?:[A-Za-z]+)-(?:Cim|Wmi|Net[A-Z]|DnsClient|ScheduledTask)", re.IGNORECASE)
+WMI_ITSELF = re.compile(r"^(?:[A-Za-z]+)-(?:Cim|Wmi)", re.IGNORECASE)
+# Binary cmdlets that query WMI inside themselves, so neither their module nor
+# their form gives them away.
+WMI_BACKED_CMDLETS = (
+    "Get-ComputerInfo", "Get-HotFix", "Get-WmiObject", "Invoke-WmiMethod", "Set-WmiInstance",
+    "Remove-WmiObject", "Register-WmiEvent", "Register-CimIndicationEvent",
+    "Restart-Computer", "Stop-Computer",
+)
+SYSTEM_QUERY_WRAPPER = "Invoke-LcBoundedSystemQuery"
+SYSTEM_QUERY_BOUND_VARIABLE = "SystemQueryTimeoutSeconds"
+
+# The two WMI calls that are deliberately NOT bounded, by file, function and
+# (resolved) command. Both CHANGE the firewall, and a change abandoned at a
+# deadline may still land after the script has reported it as not made --
+# which would break the strict LAN script's promise never to change anything
+# without saying what it changed. Each runs only after Get-LcStrictLanRules,
+# which is bounded, has just read the firewall; a WMI that stops answering
+# between the two is not covered, and that is the accepted cost of not
+# abandoning a change.
+SYSTEM_QUERY_UNBOUNDED_ALLOWED = {
+    ("StrictLan.ps1", "Invoke-LcStrictLanApply", "New-NetFirewallRule"),
+    ("StrictLan.ps1", "Invoke-LcStrictLanRemove", "Remove-NetFirewallRule"),
+}
+
+# The census: call sites that must be FOUND, bounded, for the scan to count.
+# A scan that finds nothing passes for the wrong reason.
+SYSTEM_QUERY_REQUIRED_SITES = (
+    ("Common.ps1", "Get-LcProcessIdentity", "Get-CimInstance"),
+    ("Common.ps1", "Get-LcLanAddress", "Get-NetIPAddress"),
+)
+
+WMI_CALL_SITES_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$paths = @(ConvertFrom-Json -InputObject $env:LC_WMI_LINT_PATHS)
+$pattern = $env:LC_WMI_LINT_PATTERN
+$backed = @(ConvertFrom-Json -InputObject $env:LC_WMI_LINT_BACKED)
+$wrapper = $env:LC_WMI_LINT_WRAPPER
+$typePattern = '(?i)(?:^|[^\w.])(?:(?:System\.)?Management\.(?!Automation\b)\w|Microsoft\.Management\.Infrastructure\b)|^(?:wmi|wmisearcher|wmiclass)$|WbemScripting'
+$resolved = @{}
+
+function Resolve-WmiCommand([string]$written) {
+    if ($resolved.ContainsKey($written)) { return $resolved[$written] }
+    $answer = [pscustomobject]@{ Name = $written; Wmi = $false; Why = '' }
+    $bare = $written
+    if ($bare -match '\\') { $bare = $bare.Substring($bare.LastIndexOf('\') + 1) }
+    $answer.Name = $bare
+    $command = $null
+    try { $command = Get-Command -Name $written -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    if ($null -eq $command -and $bare -ne $written) {
+        try { $command = Get-Command -Name $bare -ErrorAction Stop | Select-Object -First 1 } catch { $command = $null }
+    }
+    $hops = 0
+    while ($command -and $command.CommandType -eq 'Alias' -and $hops -lt 8) {
+        $command = $command.ResolvedCommand
+        $hops++
+    }
+    if ($command) {
+        $answer.Name = $command.Name
+        if ($command.ModuleName -eq 'CimCmdlets') { $answer.Wmi = $true; $answer.Why = 'CimCmdlets' }
+        elseif ($command.CommandType -eq 'Function' -and
+            ("$($command.Definition)" -match '\$__cmdletization_objectModelWrapper' -or
+             ($command.Module -and "$($command.Module.ModuleType)" -eq 'Cim'))) {
+            $answer.Wmi = $true; $answer.Why = "a CIM (cmdletization) command of $($command.ModuleName)"
+        }
+    }
+    if (-not $answer.Wmi -and ($backed -contains $answer.Name)) { $answer.Wmi = $true; $answer.Why = 'queries WMI itself' }
+    if (-not $answer.Wmi -and $answer.Name -match $pattern) { $answer.Wmi = $true; $answer.Why = 'named like a WMI command' }
+    $resolved[$written] = $answer
+    return $answer
+}
+
+function Get-Placement($node) {
+    $function = ''
+    $bounded = $false
+    $at = $node.Parent
+    while ($null -ne $at) {
+        if (-not $function -and $at -is [System.Management.Automation.Language.FunctionDefinitionAst]) {
+            $function = $at.Name
+        }
+        if (-not $bounded -and $at -is [System.Management.Automation.Language.ScriptBlockExpressionAst]) {
+            $holder = $at.Parent
+            # -Query { ... }: the block is the element after the parameter.
+            if ($holder -is [System.Management.Automation.Language.CommandAst] -and
+                $holder.GetCommandName() -eq $wrapper) {
+                $elements = $holder.CommandElements
+                $index = $elements.IndexOf($at)
+                if ($index -gt 0 -and
+                    $elements[$index - 1] -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $elements[$index - 1].ParameterName -eq 'Query' -and
+                    $null -eq $elements[$index - 1].Argument) {
+                    $bounded = $true
+                }
+            }
+            # -Query:{ ... }: the block is the parameter's own argument.
+            if ($holder -is [System.Management.Automation.Language.CommandParameterAst] -and
+                $holder.ParameterName -eq 'Query' -and
+                $holder.Parent -is [System.Management.Automation.Language.CommandAst] -and
+                $holder.Parent.GetCommandName() -eq $wrapper) {
+                $bounded = $true
+            }
+        }
+        $at = $at.Parent
+    }
+    return [pscustomobject]@{ Function = $function; Bounded = $bounded }
+}
+
+$found = @()
+foreach ($path in $paths) {
+    $tokens = $null
+    $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+    $file = [System.IO.Path]::GetFileName($path)
+
+    foreach ($command in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $written = $command.GetCommandName()
+        if (-not $written) { continue }
+        $placement = $null
+        $what = Resolve-WmiCommand $written
+        if ($what.Wmi) {
+            $placement = Get-Placement $command
+            $timeout = ''
+            $elements = $command.CommandElements
+            for ($i = 0; $i -lt $elements.Count; $i++) {
+                $element = $elements[$i]
+                if ($element -is [System.Management.Automation.Language.CommandParameterAst] -and
+                    $element.ParameterName -eq 'OperationTimeoutSec') {
+                    if ($element.Argument) { $timeout = $element.Argument.Extent.Text }
+                    elseif ($i + 1 -lt $elements.Count) { $timeout = $elements[$i + 1].Extent.Text }
+                }
+            }
+            $found += [pscustomobject]@{
+                file = $file; path = $path; line = $command.Extent.StartLineNumber; kind = 'command'
+                written = $written; name = $what.Name; why = $what.Why
+                function = $placement.Function; bounded = $placement.Bounded; timeout = $timeout
+            }
+        }
+        # New-Object naming a WMI type or the WMI scripting COM object.
+        if ((Resolve-WmiCommand $written).Name -eq 'New-Object') {
+            foreach ($element in $command.CommandElements) {
+                if ($element -is [System.Management.Automation.Language.StringConstantExpressionAst] -and
+                    $element -ne $command.CommandElements[0] -and $element.Value -match $typePattern) {
+                    $placement = Get-Placement $command
+                    $found += [pscustomobject]@{
+                        file = $file; path = $path; line = $command.Extent.StartLineNumber; kind = 'type'
+                        written = $element.Value; name = $element.Value; why = 'New-Object of a WMI type'
+                        function = $placement.Function; bounded = $placement.Bounded; timeout = ''
+                    }
+                }
+            }
+        }
+    }
+
+    $types = $ast.FindAll({
+            param($n)
+            $n -is [System.Management.Automation.Language.TypeExpressionAst] -or
+            $n -is [System.Management.Automation.Language.TypeConstraintAst]
+        }, $true)
+    foreach ($typeNode in $types) {
+        $text = $typeNode.TypeName.FullName
+        $real = ''
+        try { $reflected = $typeNode.TypeName.GetReflectionType(); if ($reflected) { $real = $reflected.FullName } } catch { $real = '' }
+        $parts = @($text) + @(([regex]::Split($text, '[\[\],\s]') | Where-Object { $_ }))
+        $hit = @($parts + @($real) | Where-Object { $_ -and $_ -match $typePattern }).Count -gt 0
+        if (-not $hit) { continue }
+        $placement = Get-Placement $typeNode
+        $found += [pscustomobject]@{
+            file = $file; path = $path; line = $typeNode.Extent.StartLineNumber; kind = 'type'
+            written = $typeNode.Extent.Text; name = "[$text]"; why = 'a WMI type'
+            function = $placement.Function; bounded = $placement.Bounded; timeout = ''
+        }
+    }
+}
+ConvertTo-Json -InputObject @($found) -Depth 3 -Compress
+"""
+
+
+def wmi_call_sites(paths):
+    """Every WMI-reaching command or type use in ``paths``, read from the syntax tree."""
+    env = dict(os.environ)
+    env["LC_WMI_LINT_PATHS"] = json.dumps([str(path) for path in paths])
+    env["LC_WMI_LINT_PATTERN"] = WMI_COMMAND.pattern
+    env["LC_WMI_LINT_BACKED"] = json.dumps(list(WMI_BACKED_CMDLETS))
+    env["LC_WMI_LINT_WRAPPER"] = SYSTEM_QUERY_WRAPPER
+    result = subprocess.run(
+        [PWSH, "-NoProfile", "-NonInteractive", "-Command", WMI_CALL_SITES_SCRIPT],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=300, env=env, cwd=str(REPO), stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise AssertionError("the syntax-tree scan failed:\n" + (result.stdout or "") +
+                             (result.stderr or ""))
+    return as_list(json.loads(result.stdout))
+
+
+def unbounded_wmi_offenders(sites):
+    """Each use that breaks the rule, as one line naming it and why."""
+    offenders = []
+    for site in sites:
+        where = "{}:{} {} = {} ({}; in {})".format(
+            site["file"], site["line"], site["written"], site["name"], site["why"],
+            site["function"] or "the script body")
+        key = (site["file"], site["function"], site["name"])
+        if not site["bounded"]:
+            if site["kind"] == "command" and key in SYSTEM_QUERY_UNBOUNDED_ALLOWED:
+                continue
+            offenders.append(where + " -- not inside " + SYSTEM_QUERY_WRAPPER + " -Query")
+            continue
+        if site["kind"] == "command" and WMI_ITSELF.match(site["name"]) and \
+                site["timeout"] != "$" + SYSTEM_QUERY_BOUND_VARIABLE:
+            offenders.append(where + " -- carries no -OperationTimeoutSec $" +
+                             SYSTEM_QUERY_BOUND_VARIABLE)
+    return offenders
+
+
+def script_sources_for_the_wmi_rule():
+    """Every shipped PowerShell source the rule binds: scripts/ and comfy/, no tests."""
+    tests = (SCRIPTS / "tests").resolve()
+    return [path for path in powershell_sources()
+            if tests not in path.resolve().parents
+            and (SCRIPTS.resolve() in path.resolve().parents
+                 or COMFY.resolve() in path.resolve().parents)]
+
+
+# Each way of reaching WMI the rule must catch, as (label, line appended to a
+# copy of stop.ps1, what the offender must say). Scanned only, never run.
+WMI_LINT_EVASIONS = (
+    ("a new cmdlet elsewhere", "$a = @(Get-NetAdapter -ErrorAction Stop)", "not inside"),
+    ("alias gcim", "$p = gcim Win32_OperatingSystem", "Get-CimInstance"),
+    ("alias icim", "icim -ClassName Win32_OperatingSystem -MethodName Reboot", "Invoke-CimMethod"),
+    ("alias ncms", "$s = ncms", "New-CimSession"),
+    ("module-qualified CimCmdlets", "$p = CimCmdlets\\Get-CimInstance Win32_OperatingSystem",
+     "Get-CimInstance"),
+    ("module-qualified NetTCPIP", "$a = NetTCPIP\\Get-NetIPAddress", "Get-NetIPAddress"),
+    ("Storage Get-Volume", "$v = Get-Volume", "cmdletization"),
+    ("Storage Get-Disk", "$d = Get-Disk", "cmdletization"),
+    ("Get-PnpDevice", "$g = Get-PnpDevice -Class Display", "cmdletization"),
+    ("Get-SmbShare", "$s = Get-SmbShare", "cmdletization"),
+    ("Get-Printer", "$p = Get-Printer", "cmdletization"),
+    ("Get-ComputerInfo", "$c = Get-ComputerInfo", "queries WMI itself"),
+    ("Get-HotFix", "$h = Get-HotFix", "queries WMI itself"),
+    ("Get-WmiObject (not in pwsh 7)", "$w = Get-WmiObject Win32_OperatingSystem", "not inside"),
+    ("the invocation operator", "& 'Get-CimInstance' -ClassName Win32_OperatingSystem", "not inside"),
+    ("[wmisearcher]", "$s = [wmisearcher]'SELECT * FROM Win32_OperatingSystem'", "a WMI type"),
+    ("[wmi]", "$o = [wmi]'root/cimv2:Win32_OperatingSystem=@'", "a WMI type"),
+    ("[wmiclass]", "$c = [wmiclass]'Win32_OperatingSystem'", "a WMI type"),
+    ("System.Management type",
+     "$s = [System.Management.ManagementObjectSearcher]::new('SELECT * FROM Win32_OperatingSystem')",
+     "a WMI type"),
+    ("System.Management without the System prefix",
+     "$s = [Management.ManagementObjectSearcher]::new('x')", "a WMI type"),
+    ("CimSession through .NET",
+     "$r = [Microsoft.Management.Infrastructure.CimSession]::Create($null).QueryInstances("
+     "'root/cimv2', 'WQL', 'SELECT * FROM Win32_OperatingSystem')", "a WMI type"),
+    ("a CimInstance parameter type",
+     "function Test-Lc { param([Microsoft.Management.Infrastructure.CimInstance]$Item) }", "a WMI type"),
+    ("New-Object of a WMI type",
+     "$s = New-Object -TypeName System.Management.ManagementObjectSearcher", "New-Object"),
+    ("the WMI scripting COM object", "$l = New-Object -ComObject WbemScripting.SWbemLocator",
+     "New-Object"),
+    ("another wrapper's name",
+     "$r = Invoke-LcSystemQuery -Query { Get-NetRoute -ErrorAction Stop }", "not inside"),
+    ("a block that is not -Query",
+     "$r = Invoke-LcBoundedSystemQuery -What 'x' -Arguments { Get-NetRoute }", "not inside"),
+    ("an exempt cmdlet outside its function",
+     "function Invoke-LcSomethingElse {\n    New-NetFirewallRule -Name 'x'\n}", "not inside"),
+)
+
+
+class SystemQueryBoundLintTests(unittest.TestCase):
+    """No WMI call in the shipped scripts escapes the bound."""
+
+    def test_every_wmi_call_in_the_scripts_is_bounded(self):
+        sources = script_sources_for_the_wmi_rule()
+        self.assertIn(SCRIPTS / "lib" / "Common.ps1", sources)
+        sites = wmi_call_sites(sources)
+        self.assertEqual([], unbounded_wmi_offenders(sites))
+
+        found = {(site["file"], site["function"], site["name"]) for site in sites
+                 if site["bounded"]}
+        for required in SYSTEM_QUERY_REQUIRED_SITES:
+            self.assertIn(required, found,
+                          "the scan did not find {} bounded; it may be scanning nothing".format(
+                              required))
+        # Every exemption still names a real call site: an exemption for a call
+        # that has moved would silently exempt the next one written there.
+        present = {(site["file"], site["function"], site["name"]) for site in sites}
+        for allowed in SYSTEM_QUERY_UNBOUNDED_ALLOWED:
+            self.assertIn(allowed, present, "a stale exemption: {}".format(allowed))
+
+    def test_the_rule_fires_on_every_way_around_it(self):
+        """The scan proved against the mistakes it exists to catch.
+
+        Each case is written into a copy, in a directory of this test's own,
+        and only scanned -- never run. All cases are scanned in one pass, one
+        file each, so an offender is attributed to its own file.
+        """
+        workspace = make_temporary_directory(prefix="lc wmi lint ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        library = (SCRIPTS / "lib" / "Common.ps1").read_text(encoding="utf-8-sig")
+        stop = (SCRIPTS / "stop.ps1").read_text(encoding="utf-8-sig")
+
+        def replaced_once(text, old, new):
+            self.assertEqual(1, text.count(old), "the anchor is not in the source once: " + old)
+            return text.replace(old, new)
+
+        cases = {
+            # The identity read taken back out of the wrapper.
+            "identity unwrapped": (
+                "Common.ps1",
+                replaced_once(
+                    library,
+                    "$info = @(Invoke-LcBoundedSystemQuery -What 'a process query (WMI)' "
+                    "-Arguments @{ ProcessId = $ProcessId } -Query {",
+                    "$info = @(& {"),
+                "not inside"),
+            # Inside the wrapper, but WMI itself is no longer asked for the bound.
+            "no operation timeout": (
+                "Common.ps1",
+                replaced_once(
+                    library,
+                    " -OperationTimeoutSec $SystemQueryTimeoutSeconds -ErrorAction Stop |",
+                    " -ErrorAction Stop |"),
+                "carries no -OperationTimeoutSec"),
+        }
+        for label, line, expected in WMI_LINT_EVASIONS:
+            file = "StrictLan.ps1" if "exempt" in label else "stop.ps1"
+            cases[label] = (file, stop + "\n" + line + "\n", expected)
+
+        targets = {}
+        for index, (label, (file, text, expected)) in enumerate(sorted(cases.items())):
+            folder = workspace / "case {:02d}".format(index)
+            folder.mkdir()
+            target = folder / file
+            target.write_text(text, encoding="utf-8")
+            targets[str(target)] = (label, expected)
+        sites = wmi_call_sites([Path(path) for path in targets])
+
+        for path, (label, expected) in targets.items():
+            with self.subTest(case=label):
+                mine = wmi_call_sites_for(sites, path)
+                offenders = unbounded_wmi_offenders(mine)
+                self.assertTrue(offenders, "the rule did not fire on " + label)
+                self.assertTrue(any(expected in offender for offender in offenders),
+                                "fired, but not for the right reason: {} -> {}".format(
+                                    label, offenders))
+
+    def test_the_unmodified_sources_pass_the_same_scan(self):
+        """The control for the test above: the copies differ only by the case."""
+        sites = wmi_call_sites([SCRIPTS / "lib" / "Common.ps1", SCRIPTS / "lib" / "StrictLan.ps1",
+                                SCRIPTS / "stop.ps1"])
+        self.assertEqual([], unbounded_wmi_offenders(sites))
+        self.assertTrue(sites, "the control found no WMI call at all")
+
+    def test_the_colon_form_of_query_counts_as_bounded(self):
+        """-Query:{ ... } is the same parameter as -Query { ... }: no false alarm."""
+        workspace = make_temporary_directory(prefix="lc wmi lint ")
+        self.addCleanup(shutil.rmtree, workspace, True)
+        target = workspace / "colon.ps1"
+        target.write_text(
+            "$r = Invoke-LcBoundedSystemQuery -What 'x' -Query:{ Get-NetRoute -ErrorAction Stop }\n",
+            encoding="utf-8")
+        sites = wmi_call_sites([target])
+        self.assertEqual(1, len(sites), sites)
+        self.assertEqual([], unbounded_wmi_offenders(sites))
+
+
+def wmi_call_sites_for(sites, path):
+    """The sites the scan found in one file, told apart by the folder it is in."""
+    return [site for site in sites if site.get("path", "") == path]
+
+
+# ==========================================================================
+# Every WMI/CIM read is bounded, and an unanswered one proves nothing
+# ==========================================================================
+#
+# Get-CimInstance and the Get-Net* / Get-DnsClient* cmdlets wait on WMI, which
+# answers when it answers. The ownership identity read had no bound at all, so
+# a cold or wedged provider stalled start.ps1 on its record and stop.ps1 and
+# status.ps1 on their check, for as long as WMI chose. Every such read now goes
+# through Invoke-LcBoundedSystemQuery (lib/Common.ps1), under the one bound
+# below, and a read that is not answered in time is an unreadable identity:
+# "unproven", the record kept, nothing stopped.
+#
+# A WMI that never answers is simulated here, never produced: nothing in this
+# suite stops, restarts or loads a Windows service. A function named like the
+# cmdlet is defined ahead of the call, which PowerShell resolves before the
+# cmdlet -- the same seam the firewall tests use -- and its body is an
+# UNINTERRUPTIBLE sleep, so nothing but ending the process that runs it ends it.
+
+SYSTEM_QUERY_BOUND_SECONDS = 15
+# What a bounded read may take beyond the bound: the child PowerShell it runs
+# in has to start, and has to be ended. Measured on the development machine at
+# about two seconds; the margin is generous and still far below any stall.
+SYSTEM_QUERY_MARGIN_SECONDS = 10
+
+STALLED_CIM = (
+    "function Get-CimInstance {\n"
+    "    # Injected by the test suite: WMI never answers. Thread.Sleep and not\n"
+    "    # Start-Sleep, because a pipeline stop cannot interrupt it.\n"
+    "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+# A provider that honours -OperationTimeoutSec: asked with a bound, it gives up
+# and says so; asked without one, it never answers.
+CIM_HONOURING_ITS_TIMEOUT = (
+    "function Get-CimInstance {\n"
+    "    [CmdletBinding()] param([string]$ClassName, [string]$Filter, [int]$OperationTimeoutSec)\n"
+    "    # Injected by the test suite: a provider that honours its timeout.\n"
+    "    if ($PSBoundParameters.ContainsKey('OperationTimeoutSec')) {\n"
+    "        throw \"Injected: the WMI operation timed out after $OperationTimeoutSec seconds.\"\n"
+    "    }\n"
+    "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+FAILING_CIM = (
+    "function Get-CimInstance {\n"
+    "    # Injected by the test suite: the WMI query fails outright.\n"
+    "    throw 'Injected: the WMI provider failed.'\n"
+    "}\n")
+
+# Windows answers, but with nothing that identifies the process.
+CIM_WITHOUT_AN_EXECUTABLE = (
+    "function Get-CimInstance {\n"
+    "    # Injected by the test suite: an answer with no executable in it.\n"
+    "    [pscustomobject]@{ ExecutablePath = ''; CommandLine = ''; CreationDate = [datetime]::UtcNow }\n"
+    "}\n")
+
+STALLED_NET_IP_ADDRESS = (
+    "function Get-NetIPAddress {\n"
+    "    # Injected by the test suite: the adapter query never answers.\n"
+    "    [System.Threading.Thread]::Sleep(400000)\n"
+    "}\n")
+
+
+def stalled_stop_limit(records):
+    """The harness limit for a stop.ps1 run whose identity reads all stall.
+
+    Derived from stop.ps1's own bounds so a slow run that is still inside
+    them fails a timing assertion with its output, instead of being cut off
+    as if it had hung: pwsh start-up allowance (60 s) + the configuration
+    read (120 s) + its drain (30 s) + per record one bounded identity read
+    and its child start-up (SYSTEM_QUERY_BOUND_SECONDS + 30 s) + 3 s.
+    """
+    return 60 + 120 + 30 + records * (SYSTEM_QUERY_BOUND_SECONDS + 30) + 3
+
+
+class SystemQueryBoundTests(MachineInterfaceTestCase):
+    """What the scripts do when Windows does not answer a WMI/CIM query.
+
+    The six rules of ownership hold with the query stalled exactly as they do
+    with it answered: a retained record survives while its process lives; a
+    process whose identity could not be read is not stopped; once the proof is
+    there again the ordinary stop.ps1 stops it; an unrelated process is never
+    stopped; a record whose start time or image disagrees is never ownership;
+    and a record is removed only when its process is proved gone. And nothing
+    waits for WMI longer than the bound.
+    """
+
+    def copy_scripts_with(self, shadow, label):
+        """A copy of the scripts whose library defines ``shadow`` at its end.
+
+        Appended, so it replaces nothing: it is simply the definition
+        PowerShell finds first for that command name. The copy lives in this
+        test's own workspace; the scripts this suite runs are not touched.
+        """
+        copied = self.workspace / "scripts {}".format(label)
+        shutil.copytree(SCRIPTS, copied, ignore=shutil.ignore_patterns("tests"))
+        library = copied / "lib" / "Common.ps1"
+        self.assertIn(Path(self.workspace).resolve(), library.resolve().parents,
+                      "refusing to write a shadow outside this test's workspace")
+        text = library.read_text(encoding="utf-8-sig")
+        library.write_text(text + "\n" + shadow, encoding="utf-8")
+        return copied
+
+    def owned_record(self, pid, **overrides):
+        record = {
+            "pid": pid,
+            "role": "comfy",
+            "start_time_utc_ticks": self.process_start_ticks(pid),
+            "image_path": sys.executable,
+            "owned_by": "localcanvas",
+        }
+        record.update(overrides)
+        return record
+
+    def identity_under(self, shadow, pid, timeout=SYSTEM_QUERY_BOUND_SECONDS + 45):
+        """Get-LcProcessIdentity's answer with ``shadow`` in force, and how long it took."""
+        result = self.run_powershell(
+            shadow +
+            "$watch = [System.Diagnostics.Stopwatch]::StartNew()\n"
+            "$identity = Get-LcProcessIdentity -ProcessId {}\n"
+            "$seconds = $watch.Elapsed.TotalSeconds\n"
+            "[pscustomobject]@{{\n"
+            "    Readable = [bool]$identity.Readable\n"
+            "    ExecutablePath = [string]$identity.ExecutablePath\n"
+            "    Reason = [string]$identity.Reason\n"
+            "    TimedOut = [bool]$(if ($identity.PSObject.Properties['TimedOut']) {{ $identity.TimedOut }} else {{ $false }})\n"
+            "    QueryFailed = [bool]$(if ($identity.PSObject.Properties['QueryFailed']) {{ $identity.QueryFailed }} else {{ $false }})\n"
+            "    Seconds = $seconds\n"
+            "}} | ConvertTo-Json -Compress\n".format(int(pid)),
+            timeout=timeout)
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        return json.loads(result.stdout)
+
+    def verdict_under(self, shadow, record, role="comfy"):
+        """Resolve-LcOwnedProcess's verdict on ``record`` with ``shadow`` in force."""
+        runtime = self.workspace / "decision runtime"
+        runtime.mkdir(exist_ok=True)
+        pid_file = runtime / "{}.pid".format(role)
+        pid_file.write_text(json.dumps(record), encoding="utf-8")
+        result = self.run_powershell(
+            shadow +
+            "$owned = Resolve-LcOwnedProcess -Role '{}'\n"
+            "[pscustomobject]@{{\n"
+            "    State = [string]$owned.State\n"
+            "    Reason = [string]$owned.Reason\n"
+            "}} | ConvertTo-Json -Compress\n".format(role),
+            runtime_dir=runtime, timeout=SYSTEM_QUERY_BOUND_SECONDS + 45)
+        self.assertEqual(0, result.returncode, self.output_of(result))
+        verdict = json.loads(result.stdout)
+        verdict["record_after"] = json.loads(pid_file.read_text(encoding="utf-8")) \
+            if pid_file.exists() else None
+        return verdict
+
+    def assert_names_wmi_and_the_bound(self, text):
+        self.assertIn("WMI", text)
+        self.assertIn("within {} s".format(SYSTEM_QUERY_BOUND_SECONDS), text)
+
+    # -- the bound itself --------------------------------------------------
+
+    def test_the_bound_these_tests_use_is_the_librarys_own(self):
+        """A fixture that drifted from the library would prove nothing at all."""
+        text = (SCRIPTS / "lib" / "Common.ps1").read_text(encoding="utf-8-sig")
+        self.assertEqual(
+            1, len(re.findall(r"(?m)^\$script:SystemQueryTimeoutSeconds = {}$".format(
+                SYSTEM_QUERY_BOUND_SECONDS), text)),
+            "Common.ps1 does not define the bound these tests assume, exactly once")
+
+    def test_an_identity_read_windows_never_answers_is_unreadable_within_the_bound(self):
+        idle = self.start_idle_process()
+        identity = self.identity_under(STALLED_CIM, idle.pid)
+
+        self.assertFalse(identity["Readable"], identity)
+        self.assertEqual("", identity["ExecutablePath"])
+        self.assertTrue(identity["TimedOut"], identity)
+        self.assertTrue(identity["QueryFailed"], identity)
+        self.assertIn("PID {}".format(idle.pid), identity["Reason"])
+        self.assert_names_wmi_and_the_bound(identity["Reason"])
+        # It waited the bound -- the fixture really did stall -- and not
+        # appreciably longer.
+        self.assertGreaterEqual(identity["Seconds"], SYSTEM_QUERY_BOUND_SECONDS - 0.5, identity)
+        self.assertLess(identity["Seconds"],
+                        SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS, identity)
+        self.assertIsNone(idle.poll(), "reading an identity ended the process it was about")
+
+    def test_the_timeout_is_also_asked_of_wmi_itself(self):
+        """-OperationTimeoutSec is passed, carrying the same bound.
+
+        A provider that honours it gives up on its own, well inside the bound,
+        and that failure is an unreadable identity too -- never proof.
+        """
+        idle = self.start_idle_process()
+        identity = self.identity_under(CIM_HONOURING_ITS_TIMEOUT, idle.pid)
+
+        self.assertFalse(identity["Readable"], identity)
+        self.assertTrue(identity["QueryFailed"], identity)
+        self.assertFalse(identity["TimedOut"], identity)
+        self.assertIn(
+            "timed out after {} seconds".format(SYSTEM_QUERY_BOUND_SECONDS), identity["Reason"])
+        self.assertLess(identity["Seconds"], SYSTEM_QUERY_BOUND_SECONDS, identity)
+
+    def test_the_lan_address_query_windows_never_answers_falls_back_within_the_bound(self):
+        result = self.run_powershell(
+            STALLED_NET_IP_ADDRESS +
+            "$watch = [System.Diagnostics.Stopwatch]::StartNew()\n"
+            "$address = Get-LcLanAddress\n"
+            "$seconds = $watch.Elapsed.TotalSeconds\n"
+            "$dns = @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) |\n"
+            "    Where-Object { $_.AddressFamily -eq 'InterNetwork' -and $_.ToString() -notlike '127.*' -and\n"
+            "        $_.ToString() -notlike '169.254.*' } | Select-Object -First 1)\n"
+            "[pscustomobject]@{\n"
+            "    Address = [string]$address\n"
+            "    Dns = $(if ($dns) { $dns[0].ToString() } else { '' })\n"
+            "    Seconds = $seconds\n"
+            "} | ConvertTo-Json -Compress\n",
+            timeout=SYSTEM_QUERY_BOUND_SECONDS + 45)
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        answer = json.loads(result.stdout.strip().splitlines()[-1])
+        # The fallback it always had, and nothing else: the DNS answer.
+        self.assertEqual(answer["Dns"], answer["Address"], output)
+        self.assertIn("[WARN] Windows did not answer a network address query within {} s".format(
+            SYSTEM_QUERY_BOUND_SECONDS), output)
+        self.assertGreaterEqual(answer["Seconds"], SYSTEM_QUERY_BOUND_SECONDS - 0.5, answer)
+        self.assertLess(answer["Seconds"],
+                        SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS, answer)
+
+    # -- a timeout is never proof ------------------------------------------
+
+    def test_a_timed_out_identity_is_unproven_however_well_the_record_matches(self):
+        """Rules 2 and 5: nothing about a record is ownership without an answer.
+
+        The record matching in every particular, and the two ways a reused PID
+        disagrees -- another start time, another executable -- all come out
+        the same: unproven, never running, and the record kept.
+        """
+        idle = self.start_idle_process()
+        records = {
+            "matching": self.owned_record(idle.pid),
+            "other start time": self.owned_record(idle.pid, start_time_utc_ticks=637000000000000000),
+            "other executable": self.owned_record(idle.pid, image_path=r"C:\another install\python.exe"),
+        }
+        for label, record in records.items():
+            with self.subTest(record=label):
+                verdict = self.verdict_under(STALLED_CIM, record)
+                self.assertEqual("unproven", verdict["State"], verdict)
+                self.assert_names_wmi_and_the_bound(verdict["Reason"])
+                self.assertEqual(record, verdict["record_after"], "the decision changed the record")
+        self.assertIsNone(idle.poll())
+
+    # -- stop.ps1 ----------------------------------------------------------
+
+    def test_an_owned_process_windows_will_not_identify_is_kept_then_stopped_once_proved(self):
+        """Rules 1, 2 and 3 through the real scripts.
+
+        start.ps1 launches and records ComfyUI and the gateway. With WMI not
+        answering, stop.ps1 stops neither, keeps both records unchanged, and
+        says why -- inside the bound per record. With WMI answering again, the
+        ordinary stop.ps1 stops both by those same records.
+        """
+        self.write_config()
+        start = self.run_script("start.ps1")
+        self.assertEqual(0, start.returncode, self.output_of(start))
+        comfy = self.read_pid_file("comfy")
+        gateway = self.read_pid_file("gateway")
+        self.assertIsNotNone(comfy)
+        self.assertIsNotNone(gateway)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        began = time.monotonic()
+        first = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(2))
+        took = time.monotonic() - began
+        output = self.output_of(first)
+        self.assertEqual(0, first.returncode, output)
+        self.assert_no_stack_trace(output)
+        for record in (comfy, gateway):
+            self.assertIn("could not prove it owns PID {}".format(record["pid"]), output)
+            self.assertIn("PID {} is still running and was NOT stopped.".format(record["pid"]), output)
+            self.assertTrue(self.alive(record["pid"]), output)
+        self.assert_names_wmi_and_the_bound(output)
+        self.assertEqual(comfy, self.read_pid_file("comfy"))
+        self.assertEqual(gateway, self.read_pid_file("gateway"))
+        # Two records, one bounded read each, and the rest of stop.ps1.
+        self.assertLess(took, 2 * (SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS) + 30,
+                        output)
+
+        second = self.run_script("stop.ps1")
+        output = self.output_of(second)
+        self.assertEqual(0, second.returncode, output)
+        self.assertIn("ComfyUI stopped (PID {}".format(comfy["pid"]), output)
+        for record in (comfy, gateway):
+            self.assertTrue(wait_until(lambda: not self.alive(record["pid"]), 20), output)
+        self.assertIsNone(self.read_pid_file("comfy"))
+        self.assertIsNone(self.read_pid_file("gateway"))
+
+    def test_an_unrelated_process_is_never_stopped_while_windows_does_not_answer(self):
+        """Rule 4: a record naming somebody else's process, WMI stalled.
+
+        Whatever the record says, the process it names is not stopped and the
+        record, which proves nothing either way, is kept.
+        """
+        unrelated = self.start_idle_process()
+        self.write_config()
+        record = self.owned_record(unrelated.pid, image_path=r"C:\another install\python.exe")
+        self.write_pid_file("comfy", record)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        result = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(1))
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assertIsNone(unrelated.poll(), "stop.ps1 stopped a process it could not identify")
+        self.assertIn("could not prove it owns PID {}".format(unrelated.pid), output)
+        self.assertEqual(record, self.read_pid_file("comfy"))
+
+    def test_a_record_is_removed_only_once_its_process_is_proved_gone(self):
+        """Rule 6, with WMI stalled throughout.
+
+        While the process lives, the record stays. Once it has exited -- which
+        the PID lookup proves without asking WMI -- the record goes.
+        """
+        idle = self.start_idle_process()
+        self.write_config()
+        record = self.owned_record(idle.pid)
+        self.write_pid_file("comfy", record)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        kept = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(1))
+        self.assertEqual(0, kept.returncode, self.output_of(kept))
+        self.assertEqual(record, self.read_pid_file("comfy"), self.output_of(kept))
+        self.assertIsNone(idle.poll())
+
+        # The harness ends its own process, by the handle it holds.
+        idle.kill()
+        idle.wait(timeout=15)
+        self.assertTrue(wait_until(lambda: not self.alive(idle.pid), 20))
+
+        removed = self.run_script("stop.ps1", script_dir=stalled, timeout=stalled_stop_limit(1))
+        output = self.output_of(removed)
+        self.assertEqual(0, removed.returncode, output)
+        self.assertIn("stale PID file removed", output)
+        self.assertIsNone(self.read_pid_file("comfy"))
+
+    # -- start.ps1 ---------------------------------------------------------
+
+    # The three ways Windows can fail to identify a process start.ps1 has just
+    # launched, and the fix each one is owed. (label, shadow, what the detail
+    # says, what the fix says)
+    UNIDENTIFIED_LAUNCH_CAUSES = (
+        ("stalled", STALLED_CIM,
+         "Windows did not answer a process query (WMI) within {} s".format(SYSTEM_QUERY_BOUND_SECONDS),
+         "its management service (WMI) is stuck"),
+        ("failed", FAILING_CIM,
+         "Windows could not answer a process query (WMI) for PID",
+         "Windows could not answer a process query (WMI)"),
+        ("answered without an executable", CIM_WITHOUT_AN_EXECUTABLE,
+         "Windows did not report the identity of PID",
+         "Windows could not answer a process query (WMI)"),
+    )
+
+    def comfy_launched_pids(self):
+        """PIDs of the ComfyUI stubs start.ps1 launched, from the stub's own tripwire."""
+        if not self.comfy_marker.exists():
+            return []
+        return [int(found) for found in re.findall(
+            r"pid=(\d+)", self.comfy_marker.read_text(encoding="utf-8", errors="replace"))]
+
+    def test_start_undoes_a_comfy_launch_windows_will_not_identify(self):
+        """No LocalCanvas-started ComfyUI is ever left with a record that cannot prove it.
+
+        Before, start.ps1 wrote a record without an executable and said
+        "scripts\\stop.ps1 will stop it" -- which stop.ps1 then could not do,
+        for the whole session. Now the ComfyUI this run launched is stopped by
+        the handle start.ps1 holds, nothing is recorded, no gateway starts, and
+        start.ps1 exits 3 saying which of the three causes it was.
+        """
+        for label, shadow, said, fix in self.UNIDENTIFIED_LAUNCH_CAUSES:
+            with self.subTest(cause=label):
+                # The markers are kept, not cleared: the teardown ends every PID
+                # they name, so a child a failing subtest left behind is still
+                # accounted for. What this subtest launched is what is new.
+                comfy_before = set(self.comfy_launched_pids())
+                gateway_before = set(self.launched_gateway_pids())
+                self.write_config()
+                copied = self.copy_scripts_with(shadow, "comfy {}".format(label))
+
+                began = time.monotonic()
+                result, document = self.run_json("start.ps1", script_dir=copied, timeout=170)
+                took = time.monotonic() - began
+                output = self.output_of(result)
+                self.assertEqual(3, result.returncode, output)
+                self.assert_no_stack_trace(output)
+
+                error = document["error"]
+                self.assertEqual("ComfyUI's ownership record could not be written", error["what"], output)
+                self.assertIn(said, error["detail"])
+                self.assertIn("was stopped", error["detail"])
+                self.assertIn("No gateway was started.", error["detail"])
+                self.assertIn(fix, error["fix"])
+                self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
+                self.assertNotIn("will stop it", output)
+                self.assertEqual("failed", document["comfy"]["status"], output)
+
+                # Nothing recorded, the child gone, and no gateway launched.
+                self.assertIsNone(self.read_pid_file("comfy"), output)
+                self.assertIsNone(self.read_pid_file("gateway"), output)
+                launched = [pid for pid in self.comfy_launched_pids() if pid not in comfy_before]
+                self.assertEqual(1, len(launched), output)
+                self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                                "the ComfyUI this run launched is still running with no record")
+                self.assertEqual(gateway_before, set(self.launched_gateway_pids()), output)
+                self.assertLess(took, SYSTEM_QUERY_BOUND_SECONDS + SYSTEM_QUERY_MARGIN_SECONDS + 60,
+                                output)
+
+    def test_a_record_already_there_is_kept_when_start_refuses_to_record(self):
+        """The refusal removes nothing it has not proved.
+
+        A record for a live process LocalCanvas could not prove, and a launch
+        whose identity Windows does not answer: the launch is undone, and the
+        record naming the other process -- evidence, not this run's -- stays.
+        """
+        idle = self.start_idle_process()
+        self.write_config()
+        record = self.unprovable_record(idle.pid)
+        self.write_pid_file("comfy", record)
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        result = self.run_script("start.ps1", script_dir=stalled, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(3, result.returncode, output)
+        self.assertEqual(record, self.read_pid_file("comfy"), output)
+        self.assertIsNone(idle.poll(), "start.ps1 stopped a process it could not prove")
+        launched = [pid for pid in self.comfy_launched_pids() if pid != idle.pid]
+        self.assertEqual(1, len(launched), output)
+        self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20), output)
+
+    def test_a_gateway_record_already_there_is_kept_when_start_refuses_to_record(self):
+        """The gateway twin of the test above.
+
+        An unproven gateway record for a live process the harness owns, and a
+        launch whose identity Windows does not answer: the gateway this run
+        launched is stopped, exit 5 -- and the record naming the other process
+        stays byte for byte, with that process still running.
+        """
+        other = self.start_idle_process()
+        self.write_config()
+        self.write_pid_file("gateway", self.unprovable_record(other.pid, role="gateway"))
+        before = self.pid_file_bytes("gateway")
+        gateway_before = set(self.launched_gateway_pids())
+        stalled = self.copy_scripts_with(STALLED_CIM, "with WMI stalled")
+
+        result = self.run_script("start.ps1", "-Component", "Gateway", script_dir=stalled, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertEqual(before, self.pid_file_bytes("gateway"),
+                         "the refusal changed a record that describes another process:\n" + output)
+        self.assertIsNone(other.poll(), "start.ps1 stopped a process it could not prove")
+        launched = [pid for pid in self.launched_gateway_pids() if pid not in gateway_before]
+        self.assertEqual(1, len(launched), output)
+        self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                        "the gateway this run launched is still running with no record")
+
+    def test_a_comfy_launch_that_cannot_be_undone_says_so_and_records_nothing(self):
+        """The one ending with no safe cleanup: the child will not stop.
+
+        The copy under test cannot stop anything (Stop-LcOwnedProcess returns
+        'still-running' and the copy is asserted to carry no Stop-Process), so
+        the ComfyUI it launches outlives the refusal. start.ps1 still exits 3,
+        writes no record it cannot prove, names the PID and tells the user to
+        end it -- once, without repeating itself. The teardown ends the child
+        by the PID its own marker names.
+        """
+        self.write_config()
+        copied = self.copy_scripts_with_stopping_disabled()
+        library = copied / "lib" / "Common.ps1"
+        self.assertIn(Path(self.workspace).resolve(), library.resolve().parents)
+        library.write_text(library.read_text(encoding="utf-8-sig") + "\n" + STALLED_CIM, encoding="utf-8")
+
+        result, document = self.run_json("start.ps1", script_dir=copied, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(3, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        launched = self.comfy_launched_pids()
+        self.assertEqual(1, len(launched), output)
+        self.addCleanup(self.force_terminate, launched[0])
+        self.assertTrue(self.alive(launched[0]), output)
+
+        error = document["error"]
+        self.assertEqual(
+            "ComfyUI's ownership record could not be written, and ComfyUI (PID {}) could not be "
+            "stopped".format(launched[0]), error["what"], output)
+        self.assertIn("PID {} is STILL RUNNING".format(launched[0]), error["detail"])
+        self.assertIn("No gateway was started.", error["detail"])
+        self.assertIn("End PID {} yourself".format(launched[0]), error["fix"])
+        self.assertIn("its management service (WMI) is stuck", error["fix"])
+        self.assertNotIn("Start again", error["fix"], "the fix repeats itself: " + error["fix"])
+        self.assertEqual(1, error["fix"].lower().count("start again"), error["fix"])
+        self.assertEqual(launched[0], document["comfy"]["pid"], output)
+        self.assertIsNone(self.read_pid_file("comfy"), output)
+        self.assertIsNone(self.read_pid_file("gateway"), output)
+        self.assertEqual([], self.launched_gateway_pids(), output)
+
+    def test_start_undoes_a_gateway_launch_windows_will_not_identify(self):
+        """The same rule on the gateway half: exit 5, and a fix that fits the cause.
+
+        Before, a query that FAILED (rather than timed out) was told to "make
+        sure LocalCanvas can write to" the runtime directory, which is advice
+        for a different failure.
+        """
+        for label, shadow, said, fix in self.UNIDENTIFIED_LAUNCH_CAUSES:
+            with self.subTest(cause=label):
+                gateway_before = set(self.launched_gateway_pids())
+                self.write_config()
+                copied = self.copy_scripts_with(shadow, "gateway {}".format(label))
+
+                result, document = self.run_json(
+                    "start.ps1", "-Component", "Gateway", script_dir=copied, timeout=170)
+                output = self.output_of(result)
+                self.assertEqual(5, result.returncode, output)
+                self.assert_no_stack_trace(output)
+                error = document["error"]
+                self.assertEqual("The gateway's ownership record could not be written", error["what"], output)
+                self.assertIn(said, error["detail"])
+                self.assertIn("was stopped", error["detail"])
+                self.assertIn(fix, error["fix"])
+                self.assertNotIn("Make sure LocalCanvas can write to", error["fix"])
+                self.assertEqual("failed", document["gateway"]["status"])
+                self.assertIsNone(self.read_pid_file("gateway"))
+                launched = [pid for pid in self.launched_gateway_pids() if pid not in gateway_before]
+                self.assertEqual(1, len(launched), output)
+                self.assertTrue(wait_until(lambda: not self.alive(launched[0]), 20),
+                                "the gateway this run launched is still running with no record")
+
+    def test_start_finishes_when_windows_never_answers_the_lan_address_query(self):
+        """The wildcard-bind path a user runs daily, with the adapter query stalled."""
+        self.write_config(gateway_host="0.0.0.0")
+        stalled = self.copy_scripts_with(STALLED_NET_IP_ADDRESS, "with the adapter query stalled")
+
+        result = self.run_script("start.ps1", script_dir=stalled, timeout=170)
+        output = self.output_of(result)
+        self.assertEqual(0, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        self.assertIn("[WARN] Windows did not answer a network address query within {} s".format(
+            SYSTEM_QUERY_BOUND_SECONDS), output)
+        self.assertIsNotNone(self.read_pid_file("gateway"), output)
+
+
+class ScriptTimeoutReportTests(ScriptTestCase):
+    """A script run that passes its bound says what it had printed.
+
+    Without it a stall reports "timed out after 180 seconds" and nothing else,
+    which is the one fact that does not say where it stalled.
+    """
+
+    def test_a_timed_out_script_reports_its_partial_output(self):
+        folder = self.workspace / "slow scripts"
+        folder.mkdir()
+        (folder / "slow.ps1").write_text(
+            "param([string]$Config, [string]$PythonExe, [string]$WorkflowSources)\n"
+            "Write-Output 'reached the step before the stall'\n"
+            "[Console]::Error.WriteLine('said on standard error before the stall')\n"
+            "Start-Sleep -Seconds 120\n",
+            encoding="utf-8")
+        with self.assertRaises(subprocess.TimeoutExpired) as raised:
+            self.run_script("slow.ps1", script_dir=folder, timeout=10)
+        report = str(raised.exception)
+        self.assertIn("reached the step before the stall", report)
+        self.assertIn("said on standard error before the stall", report)
+
+
+class GatewayRecordLifecycleTests(MachineInterfaceTestCase):
+    """The gateway's ownership record outlives the gateway, never the other way round.
+
+    A live gateway with no record is one nothing can stop: stop.ps1 finds no
+    record, the tray's Restart Gateway cannot stop it, and every later start
+    fails the port check. Two paths used to produce one -- a readiness timeout
+    whose stop did not take, and a record that could not be written.
+    """
+
+    def deny_creating_files_in(self, directory):
+        """Make ``directory`` refuse new files, while its existing files stay writable.
+
+        The one way to make the record write fail after the launch and not
+        before: start.ps1 truncates its two logs (existing files) before it
+        launches, and creates gateway.pid (a new file) right after. The deny
+        entry is on this test's own runtime directory, inside its own
+        workspace -- asserted before anything is changed -- and it is taken
+        off again before the workspace is removed.
+        """
+        directory = Path(directory).resolve()
+        workspace = Path(self.workspace).resolve()
+        self.assertIn(workspace, directory.parents,
+                      "refusing to change the permissions of a directory outside this test's workspace")
+        sid = current_user_sid()
+        if not sid:
+            self.skipTest("the SID of this account could not be read, so the record write "
+                          "could not be made to fail: the save-failure path was NOT verified")
+        denied = subprocess.run(["icacls", str(directory), "/deny", "*{}:(WD)".format(sid)],
+                                capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=60)
+        self.assertEqual(0, denied.returncode, denied.stdout + denied.stderr)
+        self.addCleanup(subprocess.run, ["icacls", str(directory), "/remove:d", "*{}".format(sid)],
+                        capture_output=True, timeout=60)
+        # The fixture proves itself before anything relies on it: a new file
+        # is refused, and an existing one can still be rewritten.
+        probe = directory / "probe.tmp"
+        try:
+            probe.write_text("x", encoding="utf-8")
+        except OSError:
+            pass
+        else:
+            probe.unlink()
+            self.skipTest("this account can create files through a deny entry (an elevated "
+                          "backup privilege?), so the record write could not be made to fail: "
+                          "the save-failure path was NOT verified")
+        for log in ("gateway.out.log", "gateway.err.log"):
+            (directory / log).write_text("", encoding="utf-8")
+
+    def prepare_unwritable_record(self):
+        self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        for log in ("gateway.out.log", "gateway.err.log"):
+            (self.runtime_dir / log).write_text("", encoding="utf-8")
+        self.deny_creating_files_in(self.runtime_dir)
+
+    @staticmethod
+    def pid_named_in(text):
+        found = re.search(r"PID (\d+)", text or "")
+        return int(found.group(1)) if found else None
+
+    def test_a_gateway_still_running_after_a_timeout_keeps_its_record(self):
+        """The stop does not take: the record stays, and stop.ps1 can still use it.
+
+        The copy under test cannot stop anything (copy_scripts_with_stopping_disabled
+        asserts it carries no Stop-Process at all), so the gateway it launched
+        is still running when the timeout path decides about its record.
+        """
+        self.write_config(gateway_timeout=3)
+        copied = self.copy_scripts_with_stopping_disabled()
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway", script_dir=copied,
+            env=self.script_env(LC_STUB_GATEWAY_HANG="1"))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+
+        record = self.read_pid_file("gateway")
+        self.assertIsNotNone(record, "the record of a gateway that is still running was removed:\n" + output)
+        launched = record["pid"]
+        self.addCleanup(self.force_terminate, launched)
+        self.assertTrue(self.alive(launched), output)
+        self.assertEqual([launched], self.launched_gateway_pids())
+        self.assertEqual(document["gateway"]["instance_id"], record["instance_id"])
+
+        # Said plainly, in the text and in the document.
+        gateway = document["gateway"]
+        self.assertEqual("failed", gateway["status"])
+        self.assertEqual(launched, gateway["pid"])
+        self.assertFalse(document["ok"])
+        error = document["error"]
+        self.assertIn("still running (PID {})".format(launched), error["what"])
+        self.assertIn("pwsh .\\scripts\\stop.ps1 -Component Gateway", error["fix"])
+        self.assertIn("Its ownership record was kept", error["detail"])
+        self.assertIn("[FAIL] " + error["what"], result.stderr)
+
+        # And the record is good for what it was kept for: the real stop.ps1
+        # stops that gateway by it, and only then removes it.
+        stop, stopped = self.run_json("stop.ps1", "-Component", "Gateway")
+        self.assertEqual(0, stop.returncode, self.output_of(stop))
+        self.assertEqual("running", stopped["roles"]["gateway"]["state_before"])
+        self.assertEqual("stop", stopped["roles"]["gateway"]["action"])
+        self.assertTrue(wait_until(lambda: not self.alive(launched), 20))
+        self.assertIsNone(self.read_pid_file("gateway"))
+
+    def test_a_gateway_that_exited_after_a_timeout_has_its_record_removed(self):
+        """The control: a stop that took removes the record, as before."""
+        self.write_config(gateway_timeout=3)
+        result, document = self.run_json(
+            "start.ps1", "-Component", "Gateway", env=self.script_env(LC_STUB_GATEWAY_HANG="1"))
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assertIsNone(self.read_pid_file("gateway"))
+        for pid in self.launched_gateway_pids():
+            self.assertTrue(wait_until(lambda: not self.alive(pid), 20), pid)
+        self.assertEqual("The gateway did not become ready within 3s", document["error"]["what"])
+        self.assertIsNone(document["gateway"]["pid"])
+
+    def test_a_record_that_cannot_be_written_stops_the_gateway_it_would_describe(self):
+        self.write_config()
+        self.prepare_unwritable_record()
+        result, document = self.run_json("start.ps1", "-Component", "Gateway")
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        error = document["error"]
+        self.assertEqual("The gateway's ownership record could not be written", error["what"], output)
+        self.assertIn("Record: {}".format(self.runtime_dir / "gateway.pid"), error["detail"])
+        launched = self.pid_named_in(error["detail"])
+        self.assertIsNotNone(launched, output)
+        self.addCleanup(self.force_terminate, launched)
+        self.assertIn("was stopped", error["detail"])
+        self.assertIn("Make sure LocalCanvas can write to", error["fix"])
+        self.assertEqual("failed", document["gateway"]["status"])
+        self.assertIsNone(document["gateway"]["pid"])
+        # No live orphan: the gateway it launched is gone, nothing answers on
+        # the port, and there is no record of anything.
+        self.assertTrue(wait_until(lambda: not self.alive(launched), 20),
+                        "the gateway this run launched is still running with no record")
+        self.assertFalse(http_ok(self.gateway_health_url))
+        self.assertIsNone(self.read_pid_file("gateway"))
+        self.assertNotIn("[ OK ] Gateway ready", output)
+
+    def test_a_record_that_cannot_be_written_and_a_gateway_that_cannot_be_stopped_is_loud(self):
+        """The one ending with no safe cleanup left: exit 5, and the PID named."""
+        self.write_config()
+        copied = self.copy_scripts_with_stopping_disabled()
+        self.prepare_unwritable_record()
+        result, document = self.run_json("start.ps1", "-Component", "Gateway", script_dir=copied)
+        output = self.output_of(result)
+        self.assertEqual(5, result.returncode, output)
+        self.assert_no_stack_trace(output)
+        launched = document["gateway"]["pid"]
+        self.assertIsInstance(launched, int, output)
+        self.addCleanup(self.force_terminate, launched)
+        self.assertTrue(self.alive(launched))
+        self.assertEqual("failed", document["gateway"]["status"])
+        error = document["error"]
+        self.assertIn("could not be written", error["what"])
+        self.assertIn("could not be stopped", error["what"])
+        self.assertIn("(PID {})".format(launched), error["what"])
+        self.assertIn("PID {} is STILL RUNNING".format(launched), error["detail"])
+        self.assertIn("End PID {} yourself".format(launched), error["fix"])
+        self.assertIsNone(self.read_pid_file("gateway"))
+
+
+class SyncEngineErrorJsonTests(StartWorkflowTestCase, MachineInterfaceTestCase):
+    """sync-workflows.ps1 -Json, engine exit 2: the error is the engine's own words."""
+
+    def run_sync(self, mode, *extra_args):
+        return self.run_script(
+            "sync-workflows.ps1", "-RuntimeConfig", str(self.config_path), *extra_args,
+            config=self.sources_config, env=self.sync_env(mode=mode))
+
+    def test_the_engine_fail_lines_are_the_error(self):
+        result = self.run_sync("fatal", "-Json")
+        self.assertEqual(2, result.returncode, self.output_of(result))
+        error = self.json_document(result)["error"]
+        self.assertEqual(
+            "{}: no workflow sources configuration here.".format(self.sources_config), error["what"])
+        detail = error["detail"].split("\n")
+        self.assertEqual([
+            "[FAIL] {}: no workflow sources configuration here.".format(self.sources_config),
+            "Copy config/examples/workflow-sources.example.yaml to config/local/workflow-sources.yaml",
+            "No file was written.",
+        ], detail)
+
+    def test_the_human_output_is_unchanged(self):
+        """The whole terminal text of an engine exit 2, pinned line for line.
+
+        Exactly one [FAIL] line -- the engine's -- then the engine's own lines,
+        then the closing sentence, and nothing else. Recording the failure for
+        the document must not print a second, reworded [FAIL] block; comparing
+        the plain run with the -Json run alone cannot see that, because such a
+        block would appear in both.
+        """
+        plain = self.run_sync("fatal")
+        machine = self.run_sync("fatal", "-Json")
+        self.assertEqual(2, plain.returncode, self.output_of(plain))
+        expected = [
+            "",
+            "LocalCanvas",
+            "",
+            "[INFO] LocalCanvas workflow sync",
+            "       Repository: <repo>",
+            "       Interpreter: {}".format(sys.executable),
+            "       Configuration: {}".format(self.sources_config),
+            "",
+            "[FAIL] {}: no workflow sources configuration here.".format(self.sources_config),
+            "       Copy config/examples/workflow-sources.example.yaml to config/local/workflow-sources.yaml",
+            "",
+            "       No file was written.",
+            "",
+        ]
+        repo_line = "       Repository: {}".format(REPO)
+
+        def normalised(text):
+            return ["       Repository: <repo>" if line == repo_line else line
+                    for line in text.splitlines()]
+
+        self.assertEqual(expected, normalised(plain.stdout))
+        self.assertEqual(1, plain.stdout.count("[FAIL]"), plain.stdout)
+        # And -Json moves the very same lines to standard error.
+        self.assertEqual(expected, normalised(machine.stderr))
+
+    def test_an_inventory_that_was_not_written_says_so_without_the_marker(self):
+        result = self.run_sync("inventory", "-Json")
+        self.assertEqual(2, result.returncode, self.output_of(result))
+        error = self.json_document(result)["error"]
+        self.assertTrue(error["what"].startswith("the inventory could not replace the previous one"),
+                        error["what"])
+        self.assertNotIn("[INVENTORY_NOT_WRITTEN]", error["detail"])
+        self.assertTrue(error["detail"].endswith("The next successful sync will record them."),
+                        error["detail"])
+
+    def test_the_engine_text_is_bounded(self):
+        result = self.run_sync("fatal-long", "-Json")
+        self.assertEqual(2, result.returncode, self.output_of(result))
+        error = self.json_document(result)["error"]
+        self.assertEqual(500, len(error["what"]))
+        self.assertTrue(error["what"].endswith("..."))
+        detail = error["detail"].split("\n")
+        # 40 engine lines, the count of the rest, and the closing sentence.
+        self.assertEqual(42, len(detail), detail)
+        self.assertTrue(all(len(line) <= 500 for line in detail))
+        self.assertEqual("engine line 39", detail[39])
+        self.assertEqual("... and 20 more line(s), on standard error", detail[40])
+        self.assertEqual("No file was written.", detail[41])
+        # All of it is still on standard error.
+        self.assertIn("engine line 59", result.stderr)
+
+
 CI_GROUP_OPTION = "--ci-group"
 CI_WORKFLOW = REPO / ".github" / "workflows" / "ci.yml"
 
@@ -24686,11 +28046,13 @@ CI_GROUPS = {
     "runtime-launch": [
         "ProcessOwnershipLintTests", "InlineCodeQuoteLintTests", "ReadinessContractTests",
         "ConfigurationTests", "ConfigurationSeamTests", "EndpointOwnershipTests",
-        "ManagedModeTests", "ChildStreamEncodingTests",
+        "ManagedModeTests", "ChildStreamEncodingTests", "ComponentTests", "GatewayPortCheckTests",
+        "GatewayRecordLifecycleTests", "SystemQueryBoundLintTests", "ScriptTimeoutReportTests",
     ],
     "runtime-stop": [
         "RedirectedChildLaunchTests", "ExternalModeTests", "StopTests", "ProcessIdentityTests",
         "OwnershipDecisionTests", "RuntimeDirectoryTests", "StatusTests",
+        "GatewayIdentityTests", "JsonDocumentTests", "SystemQueryBoundTests",
     ],
     "runtime-ownership": [
         "OwnershipRecordLifecycleTests", "UnidentifiedGatewayTests",
@@ -24699,7 +28061,10 @@ CI_GROUPS = {
         "ConfigurationSeamCoverageTests", "DocumentationClaimTests",
         "SupportedShellReportTests", "PublicGitignoreTests", "PublicMarkdownLinkTests",
         "PublicTreeNamesNoCheckoutTests",
-        "PowerShellVersionGateTests", "TemporaryPathSpellingTests",
+        "PowerShellVersionGateTests", "PackageOutputDirectorySafetyTests",
+        "PackageOutputDirectoryPipelineTests", "PackageScriptDeletionLintTests",
+        "BuildLauncherScriptLintTests", "BuildLauncherPipelineTests",
+        "TemporaryPathSpellingTests",
         "InterpreterGuardTests", "SuiteDependencyGuardTests",
     ],
     "strict-lan-plan": [
@@ -24723,7 +28088,8 @@ CI_GROUPS = {
     ],
     "sync-and-comfy-install": [
         "WorkflowSyncTests", "StartWorkflowCheckTests", "StartWorkflowMutationTests",
-        "ComfyDryRunTests", "ComfyInstallTests",
+        "ComfyDryRunTests", "ComfyInstallTests", "SyncJsonTests", "HiddenConsoleTests",
+        "SyncEngineErrorJsonTests",
     ],
     "comfy-bootstrap": [
         "ComfyExistingInstallationTests", "ComfyLinkedPathTests", "ComfyRefusalTests",
